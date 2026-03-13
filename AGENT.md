@@ -2,11 +2,25 @@
 
 ## Project overview
 
-This repository contains a small PlatformIO firmware project for an `ESP32 DOIT DevKit V1` using the Arduino framework and a TFT display driven through a vendored copy of `TFT_eSPI`.
+This project is a photographic darkroom timer built on `ESP32 DOIT DevKit V1` and `PlatformIO`.
+It uses:
 
-Current application entrypoint:
+- three 10-bit PWM channels for the RGB enlarger light head
+- 8-bit PWM for darkroom red light, display backlight, and button backlight
+- four dedicated front-panel buttons
+- rotary encoder with button 
+- a beeper for timer feedback
+- a `VEML7700` light sensor on I2C
+- a `TFT_eSPI` display with pins already defined in `lib/TFT_eSPI/User_Setup.h`
+
+Current application entrypoints:
 
 - `src/main.cpp`
+- `src/darkroom_hw.cpp`
+
+Public hardware header:
+
+- `include/darkroom_hw.h`
 
 Build configuration:
 
@@ -32,7 +46,8 @@ This workspace is not a Git repository. Do not assume Git-based workflows are av
 - Prefer editing project code in `src/` and `include/`.
 - Treat `.pio/` as generated output. Do not hand-edit files there.
 - Avoid broad changes inside `lib/TFT_eSPI` unless the task explicitly requires library customization.
-- If display or pin behavior needs to change, first inspect the active `TFT_eSPI` setup files before modifying application logic.
+- If display or pin behavior needs to change, inspect the active `TFT_eSPI` setup first.
+- Keep the application hardware mapping in `include/darkroom_hw.h` synchronized with the real schematic.
 - Preserve `platformio.ini` environment names unless the task explicitly requires a new board or environment.
 
 ## Current firmware behavior
@@ -40,14 +55,57 @@ This workspace is not a Git repository. Do not assume Git-based workflows are av
 As of the current workspace state:
 
 - The firmware initializes serial at `115200`.
-- It initializes a `TFT_eSPI` display and sets rotation to landscape (`1`).
-- It writes two strings to the display using free fonts from `Free_Fonts.h`.
-- It drives `TFT_LED` with `analogWrite`.
+- It initializes a hardware abstraction layer in `include/darkroom_hw.h` and `src/darkroom_hw.cpp`.
+- It exposes helper functions for RGB head PWM, darkroom red PWM, display backlight PWM, buttons backlight PWM, button reads, and beeper tone output.
+- It initializes the TFT display in landscape orientation and shows a basic pin summary screen.
 
 Be careful with:
 
-- Character rendering: `src/main.cpp` currently contains non-ASCII text (`"ÄŚas"`), which may indicate encoding or font coverage issues.
-- Pin definitions: `TFT_LED` is expected to come from the selected `TFT_eSPI` configuration, not from local project code.
+- `GPIO34` and `GPIO35` are input-only and do not provide internal pull-ups.
+- `GPIO36` and `GPIO39` are also input-only and do not provide internal pull-ups.
+- Display SPI and control pins are defined in `lib/TFT_eSPI/User_Setup.h`; application pin proposals must not conflict with them.
+- Avoid non-ASCII UI text unless the selected font has the needed glyph coverage.
+
+## Proposed ESP32 pin assignment
+
+Display and sensor:
+
+- `GPIO18`: TFT SCLK
+- `GPIO19`: TFT MISO
+- `GPIO23`: TFT MOSI
+- `GPIO15`: TFT CS
+- `GPIO2`: TFT DC
+- `GPIO4`: TFT RESET
+- `GPIO17`: display backlight PWM
+- `GPIO21`: `VEML7700` SDA
+- `GPIO22`: `VEML7700` SCL
+
+PWM outputs:
+
+- `GPIO25`: RGB light head red, 10-bit PWM
+- `GPIO26`: RGB light head green, 10-bit PWM
+- `GPIO27`: RGB light head blue, 10-bit PWM
+- `GPIO13`: darkroom red light, 8-bit PWM
+- `GPIO14`: buttons backlight, 8-bit PWM
+
+Other outputs:
+
+- `GPIO16`: beeper tone output
+
+Buttons:
+
+- `GPIO32`: magnifier light head ON
+- `GPIO33`: magnifier light head OFF
+- `GPIO34`: magnifier light head TIMER start
+- `GPIO35`: developer bath timer start
+
+Rotary encoder:
+
+- `GPIO36`: encoder A
+- `GPIO39`: encoder B
+- `GPIO5`: encoder push button
+
+This uses the `mathertel/RotaryEncoder` state-machine library for A/B decoding.
 
 ## Common commands
 
@@ -63,10 +121,11 @@ If `pio` is unavailable, use PlatformIO through the installed IDE integration or
 
 ## Change guidance
 
-- For UI changes on the display, prefer keeping layout constants near the top of `src/main.cpp`.
-- For hardware-specific fixes, document which board, display driver, and pin mapping the change assumes.
-- When changing fonts or text rendering, verify that the selected font actually supports the required glyphs.
-- Keep examples and diagnostics from `lib/TFT_eSPI/examples/` as reference material only; do not copy large example code into the main application without reducing it to the required behavior.
+- For hardware changes, update `include/darkroom_hw.h` first and keep the implementation in `src/darkroom_hw.cpp` aligned with it.
+- For PWM-controlled outputs, keep RGB at 10-bit and auxiliary channels at 8-bit unless there is a measured reason to change.
+- For buttons on `GPIO34` and `GPIO35`, and encoder signals on `GPIO36` and `GPIO39`, assume external pull-ups in hardware and active-low logic in software.
+- `GPIO5` is a boot strapping pin, so avoid holding the encoder button during reset or power-up.
+- Keep examples from `lib/TFT_eSPI/examples/` as reference material only; do not copy large example code into the main application.
 
 ## Verification expectations
 

@@ -4,12 +4,16 @@
 
 namespace DarkroomHw {
 
+static constexpr uint8_t kStatusLedPin = 2;
+static constexpr uint8_t kStatusLedCount = 1;
+static constexpr uint8_t kStatusLedBrightness = 64;
+
 struct PinAssignment {
   static constexpr uint8_t kTftMiso = 19;
   static constexpr uint8_t kTftMosi = 23;
   static constexpr uint8_t kTftSclk = 18;
   static constexpr uint8_t kTftCs = 15;
-  static constexpr uint8_t kTftDc = 2;
+  static constexpr uint8_t kTftDc = 16;
   static constexpr uint8_t kTftRst = 4;
   static constexpr uint8_t kDisplayBacklight = 17;
 
@@ -19,7 +23,7 @@ struct PinAssignment {
 
   static constexpr uint8_t kDarkroomRed = 13;
   static constexpr uint8_t kButtonsBacklight = 14;
-  static constexpr uint8_t kBeeper = 16;
+  static constexpr uint8_t kBeeper = 12;
 
   static constexpr uint8_t kButtonLightOn = 32;
   static constexpr uint8_t kButtonLightOff = 33;

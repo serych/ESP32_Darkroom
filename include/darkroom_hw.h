@@ -60,6 +60,8 @@ void setButtonsBacklight(uint8_t brightness);
 void setDisplayBacklight(uint8_t brightness);
 
 void beepTone(uint16_t frequencyHz, uint32_t durationMs, uint8_t duty = 128);
+void startBeep(uint16_t frequencyHz, uint32_t durationMs, uint8_t duty = 128);
+void updateBeep();
 void stopBeep();
 
 bool isLightOnButtonPressed();

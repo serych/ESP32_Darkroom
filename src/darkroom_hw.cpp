@@ -24,6 +24,8 @@ constexpr uint8_t kBeeperChannel = 6;
 RotaryEncoder encoder(PinAssignment::kEncoderA, PinAssignment::kEncoderB, RotaryEncoder::LatchMode::FOUR3);
 long lastEncoderPosition = 0;
 int8_t pendingEncoderDelta = 0;
+uint32_t beepStopAtMs = 0;
+bool beepActive = false;
 
 uint16_t clampRgb(uint16_t value) {
   return value > kRgbMaxDuty ? kRgbMaxDuty : value;
@@ -111,6 +113,12 @@ void setDisplayBacklight(uint8_t brightness) {
 }
 
 void beepTone(uint16_t frequencyHz, uint32_t durationMs, uint8_t duty) {
+  startBeep(frequencyHz, durationMs, duty);
+  delay(durationMs);
+  stopBeep();
+}
+
+void startBeep(uint16_t frequencyHz, uint32_t durationMs, uint8_t duty) {
   if (frequencyHz == 0 || durationMs == 0) {
     stopBeep();
     return;
@@ -118,13 +126,25 @@ void beepTone(uint16_t frequencyHz, uint32_t durationMs, uint8_t duty) {
 
   ledcWriteTone(kBeeperChannel, frequencyHz);
   ledcWrite(kBeeperChannel, duty);
-  delay(durationMs);
-  stopBeep();
+  beepStopAtMs = millis() + durationMs;
+  beepActive = true;
+}
+
+void updateBeep() {
+  if (!beepActive) {
+    return;
+  }
+
+  if (static_cast<int32_t>(millis() - beepStopAtMs) >= 0) {
+    stopBeep();
+  }
 }
 
 void stopBeep() {
   ledcWriteTone(kBeeperChannel, 0);
   ledcWrite(kBeeperChannel, 0);
+  beepActive = false;
+  beepStopAtMs = 0;
 }
 
 bool isLightOnButtonPressed() {

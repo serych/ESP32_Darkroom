@@ -7,7 +7,7 @@
 namespace {
 
 constexpr uint8_t kLedPreviewBrightness = 64;
-constexpr uint16_t kLightHeadMax = 64;
+constexpr uint16_t kLightHeadMax = 1023;
 constexpr uint16_t kTftResetPulseMs = 30;
 constexpr uint16_t kTftResetSettlingMs = 180;
 
@@ -63,9 +63,9 @@ void drawStaticUi() {
   tft.setTextFont(2);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("Buttons:", 8, 56, 2);
-  tft.drawString("Light timer  -> green", 8, 78, 2);
+  tft.drawString("Light timer  -> off", 8, 78, 2);
   tft.drawString("Light off    -> red", 8, 94, 2);
-  tft.drawString("Light on     -> yellow", 8, 110, 2);
+  tft.drawString("Light on     -> green", 8, 110, 2);
   tft.drawString("Developer    -> blue", 8, 126, 2);
 
   tft.drawString("Btn backlight:", 8, 158, 2);
@@ -130,7 +130,7 @@ void advanceDisplayBacklight() {
 
 void applyPressedColor(const DarkroomHw::ButtonState& buttons) {
   if (buttons.lightTimer) {
-    setPreviewColor(0, kLightHeadMax, 0, 0, kLedPreviewBrightness, 0);
+    setPreviewColor(0, 0, 0, 0, 0, 0);
     return;
   }
 
@@ -140,7 +140,7 @@ void applyPressedColor(const DarkroomHw::ButtonState& buttons) {
   }
 
   if (buttons.lightOn) {
-    setPreviewColor(kLightHeadMax, kLightHeadMax, 0, kLedPreviewBrightness, kLedPreviewBrightness, 0);
+    setPreviewColor(0, kLightHeadMax, 0, 0, kLedPreviewBrightness, 0);
     return;
   }
 

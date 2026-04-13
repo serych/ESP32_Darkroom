@@ -22,6 +22,8 @@ constexpr uint16_t kStartupTonesHz[] = {523, 659, 784};
 constexpr uint32_t kStartupToneDurationMs = 120;
 constexpr uint32_t kStartupGapMs = 80;
 constexpr uint32_t kClickToneDurationMs = 15;
+constexpr uint32_t kExposureEndToneDurationMs = 100;
+constexpr uint32_t kExposureEndToneGapMs = 50;
 constexpr uint32_t kWifiConnectTimeoutMs = 30000;
 constexpr char kWifiPrefsNamespace[] = "wifi";
 constexpr char kWifiSsidKey[] = "ssid";
@@ -58,6 +60,13 @@ struct ContrastRgbSetting {
   uint8_t redStep;
   uint8_t greenStep;
   uint8_t blueStep;
+};
+
+enum class LightOutputMode : uint8_t {
+  Off,
+  White,
+  Red,
+  Exposure,
 };
 
 
@@ -118,10 +127,14 @@ ContrastRgbSetting contrastRgbTable[11] = {
     {3, 5, 5}, {3, 5, 5}, {3, 5, 5}, {3, 5, 5}, {3, 5, 5}, {3, 5, 5},
     {3, 5, 5}, {3, 5, 5}, {3, 5, 5}, {3, 5, 5}, {3, 5, 5},
 };
+ContrastRgbSetting whiteLightSetting = {10, 10, 10};
+ContrastRgbSetting redLightSetting = {10, 0, 0};
 bool exposureRunning = false;
 uint32_t exposureStartedAt = 0;
 uint32_t exposureDurationMs = 0;
 uint32_t lastExposureUiRefreshAt = 0;
+LightOutputMode lightOutputMode = LightOutputMode::Off;
+bool redChordArmed = false;
 
 void drawWifiConnectedUi();
 void ensureOtaStarted();
@@ -136,6 +149,8 @@ void applyExposureLightOutput();
 void stopExposure(bool completed);
 void startExposure();
 void drawExposureFooter();
+void playExposureEndTone();
+void applyLightOutputMode();
 
 void setStatusLed(uint8_t red, uint8_t green, uint8_t blue) {
   statusLed.setPixelColor(0, statusLed.Color(red, green, blue));
@@ -403,13 +418,24 @@ void drawExposureModeUi() {
 }
 
 void drawExposureFooter() {
+  tft.setRotation(1);
+  tft.fillRect(0, 208, tft.width(), 32, TFT_BLACK);
+  tft.setTextFont(4);
   if (exposureRunning) {
     const uint32_t elapsedMs = millis() - exposureStartedAt;
     const uint32_t remainingMs = (elapsedMs >= exposureDurationMs) ? 0 : (exposureDurationMs - elapsedMs);
-    drawFooterLine("Bezi, zbyva " + formatExposureSeconds(static_cast<float>(remainingMs) / 1000.0f), TFT_YELLOW);
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.drawString("Zbyva " + formatExposureSeconds(static_cast<float>(remainingMs) / 1000.0f), 8, 212, 4);
   } else {
-    drawFooterLine("Timer=start  Off=stop  Long=config", TFT_GREEN);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString("Timer start", 8, 212, 4);
   }
+}
+
+void playExposureEndTone() {
+  DarkroomHw::beepTone(3520, kExposureEndToneDurationMs);
+  delay(kExposureEndToneGapMs);
+  DarkroomHw::beepTone(3520, kExposureEndToneDurationMs);
 }
 
 void drawConfigModeUi() {
@@ -471,8 +497,11 @@ uint16_t pwmFromLogStep(uint8_t step) {
     return 0;
   }
 
-  const uint16_t value = static_cast<uint16_t>(1U << (step - 1));
-  return (value > kLightHeadMax) ? kLightHeadMax : value;
+  if (step >= 10) {
+    return kLightHeadMax;
+  }
+
+  return static_cast<uint16_t>(1U << step);
 }
 
 void initializeExposureSteps() {
@@ -490,7 +519,7 @@ void initializeExposureSteps() {
 }
 
 void applyExposureLightOutput() {
-  if (!exposureRunning) {
+  if (lightOutputMode != LightOutputMode::Exposure || !exposureRunning) {
     setPreviewColor(0, 0, 0, 0, 0, 0);
     return;
   }
@@ -506,13 +535,49 @@ void applyExposureLightOutput() {
   setPreviewColor(red, green, blue, statusRed, statusGreen, statusBlue);
 }
 
+void applyLightOutputMode() {
+  if (lightOutputMode == LightOutputMode::Exposure) {
+    applyExposureLightOutput();
+    return;
+  }
+
+  if (lightOutputMode == LightOutputMode::White) {
+    const uint16_t red = pwmFromLogStep(whiteLightSetting.redStep);
+    const uint16_t green = pwmFromLogStep(whiteLightSetting.greenStep);
+    const uint16_t blue = pwmFromLogStep(whiteLightSetting.blueStep);
+    const uint8_t statusRed = static_cast<uint8_t>((red * kLedPreviewBrightness) / kLightHeadMax);
+    const uint8_t statusGreen = static_cast<uint8_t>((green * kLedPreviewBrightness) / kLightHeadMax);
+    const uint8_t statusBlue = static_cast<uint8_t>((blue * kLedPreviewBrightness) / kLightHeadMax);
+    setPreviewColor(red, green, blue, statusRed, statusGreen, statusBlue);
+    return;
+  }
+
+  if (lightOutputMode == LightOutputMode::Red) {
+    const uint16_t red = pwmFromLogStep(redLightSetting.redStep);
+    const uint16_t green = pwmFromLogStep(redLightSetting.greenStep);
+    const uint16_t blue = pwmFromLogStep(redLightSetting.blueStep);
+    const uint8_t statusRed = static_cast<uint8_t>((red * kLedPreviewBrightness) / kLightHeadMax);
+    const uint8_t statusGreen = static_cast<uint8_t>((green * kLedPreviewBrightness) / kLightHeadMax);
+    const uint8_t statusBlue = static_cast<uint8_t>((blue * kLedPreviewBrightness) / kLightHeadMax);
+    setPreviewColor(red, green, blue, statusRed, statusGreen, statusBlue);
+    return;
+  }
+
+  setPreviewColor(0, 0, 0, 0, 0, 0);
+}
+
 void stopExposure(bool completed) {
   exposureRunning = false;
   exposureDurationMs = 0;
-  applyExposureLightOutput();
+  lightOutputMode = LightOutputMode::Off;
+  applyLightOutputMode();
+  playExposureEndTone();
   if (uiMode == UiMode::ExposureMode) {
     drawExposureModeUi();
-    drawFooterLine(completed ? "Exposure complete" : "Exposure stopped", completed ? TFT_GREEN : TFT_YELLOW);
+    tft.fillRect(0, 208, tft.width(), 32, TFT_BLACK);
+    tft.setTextFont(4);
+    tft.setTextColor(completed ? TFT_GREEN : TFT_YELLOW, TFT_BLACK);
+    tft.drawString(completed ? "Hotovo" : "Zastaveno", 8, 212, 4);
   }
 }
 
@@ -523,7 +588,8 @@ void startExposure() {
   exposureStartedAt = millis();
   lastExposureUiRefreshAt = 0;
   exposureRunning = true;
-  applyExposureLightOutput();
+  lightOutputMode = LightOutputMode::Exposure;
+  applyLightOutputMode();
   if (uiMode == UiMode::ExposureMode) {
     drawExposureModeUi();
   }
@@ -717,12 +783,13 @@ void playStartupSequence() {
 }
 
 void applyPressedColor(const DarkroomHw::ButtonState& buttons) {
-  if (!exposureRunning) {
-    setPreviewColor(0, 0, 0, 0, 0, 0);
-  }
+  (void)buttons;
+  applyLightOutputMode();
 }
 
 void handleButtonEdges(const DarkroomHw::ButtonState& buttons) {
+  const bool lightOnReleased = !buttons.lightOn && prevLightOnPressed;
+
   if (buttons.lightTimer && !prevLightTimerPressed) {
     DarkroomHw::startBeep(3520, kClickToneDurationMs);
     if (uiMode == UiMode::WifiPasswordEntry) {
@@ -731,6 +798,7 @@ void handleButtonEdges(const DarkroomHw::ButtonState& buttons) {
       }
       drawPasswordEntryUi();
     } else if (uiMode == UiMode::ExposureMode && !exposureRunning) {
+      redChordArmed = false;
       startExposure();
     }
   }
@@ -742,6 +810,16 @@ void handleButtonEdges(const DarkroomHw::ButtonState& buttons) {
       drawPasswordEntryUi();
     } else if (uiMode == UiMode::ExposureMode && exposureRunning) {
       stopExposure(false);
+    } else if (uiMode == UiMode::ExposureMode && lightOutputMode == LightOutputMode::Red) {
+      lightOutputMode = LightOutputMode::Off;
+      redChordArmed = false;
+      applyLightOutputMode();
+      drawExposureFooter();
+    } else if (uiMode == UiMode::ExposureMode) {
+      lightOutputMode = LightOutputMode::Off;
+      redChordArmed = false;
+      applyLightOutputMode();
+      drawExposureFooter();
     }
   }
 
@@ -752,6 +830,13 @@ void handleButtonEdges(const DarkroomHw::ButtonState& buttons) {
         --passwordCursor;
       }
       drawPasswordEntryUi();
+    } else if (uiMode == UiMode::ExposureMode && !exposureRunning && buttons.lightOff) {
+      redChordArmed = true;
+    } else if (uiMode == UiMode::ExposureMode && !exposureRunning) {
+      lightOutputMode = LightOutputMode::White;
+      redChordArmed = false;
+      applyLightOutputMode();
+      drawExposureFooter();
     }
   }
 
@@ -762,6 +847,17 @@ void handleButtonEdges(const DarkroomHw::ButtonState& buttons) {
     } else if (uiMode == UiMode::WifiPasswordEntry) {
       beginWifiConnectWithEnteredCredentials();
     }
+  }
+
+  if (lightOnReleased && uiMode == UiMode::ExposureMode && !exposureRunning && redChordArmed) {
+    lightOutputMode = LightOutputMode::Red;
+    redChordArmed = false;
+    applyLightOutputMode();
+    drawExposureFooter();
+  }
+
+  if (!buttons.lightOff && !buttons.lightOn && lightOutputMode != LightOutputMode::Red && redChordArmed) {
+    redChordArmed = false;
   }
 
   prevLightTimerPressed = buttons.lightTimer;

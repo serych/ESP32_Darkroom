@@ -54,6 +54,12 @@ struct ConfigMenuEntry {
   const char* value;
 };
 
+struct ContrastRgbSetting {
+  uint8_t redStep;
+  uint8_t greenStep;
+  uint8_t blueStep;
+};
+
 
 TFT_eSPI tft = TFT_eSPI();
 Adafruit_NeoPixel statusLed(DarkroomHw::kStatusLedCount, DarkroomHw::kStatusLedPin, NEO_GRB + NEO_KHZ800);
@@ -108,6 +114,14 @@ int32_t contrastValue = 4;
 int32_t apertureValue = 0;
 ExposureFocus exposureFocus = ExposureFocus::Exposure;
 float contrastCorrectionTable[11] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+ContrastRgbSetting contrastRgbTable[11] = {
+    {3, 5, 5}, {3, 5, 5}, {3, 5, 5}, {3, 5, 5}, {3, 5, 5}, {3, 5, 5},
+    {3, 5, 5}, {3, 5, 5}, {3, 5, 5}, {3, 5, 5}, {3, 5, 5},
+};
+bool exposureRunning = false;
+uint32_t exposureStartedAt = 0;
+uint32_t exposureDurationMs = 0;
+uint32_t lastExposureUiRefreshAt = 0;
 
 void drawWifiConnectedUi();
 void ensureOtaStarted();
@@ -117,6 +131,11 @@ void enterExposureMode();
 void enterConfigMode();
 void initializeExposureSteps();
 String formatExposureSeconds(float seconds);
+uint16_t pwmFromLogStep(uint8_t step);
+void applyExposureLightOutput();
+void stopExposure(bool completed);
+void startExposure();
+void drawExposureFooter();
 
 void setStatusLed(uint8_t red, uint8_t green, uint8_t blue) {
   statusLed.setPixelColor(0, statusLed.Color(red, green, blue));
@@ -380,7 +399,17 @@ void drawExposureModeUi() {
   tft.drawString("Clona:", 8, 176, 4);
   tft.drawRightString(String(apertureValue), tft.width() - 8, 176, 4);
 
-  drawFooterLine("Short=focus  Long=config", TFT_GREEN);
+  drawExposureFooter();
+}
+
+void drawExposureFooter() {
+  if (exposureRunning) {
+    const uint32_t elapsedMs = millis() - exposureStartedAt;
+    const uint32_t remainingMs = (elapsedMs >= exposureDurationMs) ? 0 : (exposureDurationMs - elapsedMs);
+    drawFooterLine("Bezi, zbyva " + formatExposureSeconds(static_cast<float>(remainingMs) / 1000.0f), TFT_YELLOW);
+  } else {
+    drawFooterLine("Timer=start  Off=stop  Long=config", TFT_GREEN);
+  }
 }
 
 void drawConfigModeUi() {
@@ -437,6 +466,15 @@ String formatExposureSeconds(float seconds) {
   return String(minutes) + "m " + String(remainingSeconds) + "s";
 }
 
+uint16_t pwmFromLogStep(uint8_t step) {
+  if (step == 0) {
+    return 0;
+  }
+
+  const uint16_t value = static_cast<uint16_t>(1U << (step - 1));
+  return (value > kLightHeadMax) ? kLightHeadMax : value;
+}
+
 void initializeExposureSteps() {
   exposureStepCount = 0;
   float value = 1.0f;
@@ -448,6 +486,46 @@ void initializeExposureSteps() {
   if (exposureStepCount == 0) {
     exposureSeconds[0] = 1.0f;
     exposureStepCount = 1;
+  }
+}
+
+void applyExposureLightOutput() {
+  if (!exposureRunning) {
+    setPreviewColor(0, 0, 0, 0, 0, 0);
+    return;
+  }
+
+  const ContrastRgbSetting& rgb = contrastRgbTable[contrastValue];
+  const uint16_t red = pwmFromLogStep(rgb.redStep);
+  const uint16_t green = pwmFromLogStep(rgb.greenStep);
+  const uint16_t blue = pwmFromLogStep(rgb.blueStep);
+
+  const uint8_t statusRed = static_cast<uint8_t>((red * kLedPreviewBrightness) / kLightHeadMax);
+  const uint8_t statusGreen = static_cast<uint8_t>((green * kLedPreviewBrightness) / kLightHeadMax);
+  const uint8_t statusBlue = static_cast<uint8_t>((blue * kLedPreviewBrightness) / kLightHeadMax);
+  setPreviewColor(red, green, blue, statusRed, statusGreen, statusBlue);
+}
+
+void stopExposure(bool completed) {
+  exposureRunning = false;
+  exposureDurationMs = 0;
+  applyExposureLightOutput();
+  if (uiMode == UiMode::ExposureMode) {
+    drawExposureModeUi();
+    drawFooterLine(completed ? "Exposure complete" : "Exposure stopped", completed ? TFT_GREEN : TFT_YELLOW);
+  }
+}
+
+void startExposure() {
+  const float correctedExposure = exposureSeconds[exposureIndex] * contrastCorrectionTable[contrastValue];
+  const float clampedExposure = (correctedExposure < 0.1f) ? 0.1f : correctedExposure;
+  exposureDurationMs = static_cast<uint32_t>(clampedExposure * 1000.0f + 0.5f);
+  exposureStartedAt = millis();
+  lastExposureUiRefreshAt = 0;
+  exposureRunning = true;
+  applyExposureLightOutput();
+  if (uiMode == UiMode::ExposureMode) {
+    drawExposureModeUi();
   }
 }
 
@@ -639,7 +717,9 @@ void playStartupSequence() {
 }
 
 void applyPressedColor(const DarkroomHw::ButtonState& buttons) {
-  setPreviewColor(0, 0, 0, 0, 0, 0);
+  if (!exposureRunning) {
+    setPreviewColor(0, 0, 0, 0, 0, 0);
+  }
 }
 
 void handleButtonEdges(const DarkroomHw::ButtonState& buttons) {
@@ -650,6 +730,8 @@ void handleButtonEdges(const DarkroomHw::ButtonState& buttons) {
         ++passwordCursor;
       }
       drawPasswordEntryUi();
+    } else if (uiMode == UiMode::ExposureMode && !exposureRunning) {
+      startExposure();
     }
   }
 
@@ -658,6 +740,8 @@ void handleButtonEdges(const DarkroomHw::ButtonState& buttons) {
     if (uiMode == UiMode::WifiPasswordEntry) {
       deleteCharacterAtCursor();
       drawPasswordEntryUi();
+    } else if (uiMode == UiMode::ExposureMode && exposureRunning) {
+      stopExposure(false);
     }
   }
 
@@ -859,6 +943,16 @@ void loop() {
   } else if (wifiCredentialsValid && WiFi.status() == WL_CONNECTED && lastWifiStatusRefreshAt == 0) {
     updateWifiStatusUi();
     lastWifiStatusRefreshAt = millis();
+  }
+
+  if (exposureRunning) {
+    const uint32_t now = millis();
+    if ((now - exposureStartedAt) >= exposureDurationMs) {
+      stopExposure(true);
+    } else if (uiMode == UiMode::ExposureMode && (now - lastExposureUiRefreshAt) >= 100) {
+      lastExposureUiRefreshAt = now;
+      drawExposureFooter();
+    }
   }
 
   const DarkroomHw::ButtonState buttons = DarkroomHw::readButtons();

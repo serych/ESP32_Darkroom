@@ -4,6 +4,7 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <ArduinoOTA.h>
+#include <math.h>
 
 #include "darkroom_hw.h"
 
@@ -32,12 +33,25 @@ enum class UiMode : uint8_t {
   WifiPasswordEntry,
   WifiConnecting,
   WifiConnected,
+  ExposureMode,
+  ConfigMode,
+};
+
+enum class ExposureFocus : uint8_t {
+  Exposure,
+  Contrast,
+  Aperture,
 };
 
 struct NetworkEntry {
   String ssid;
   int32_t rssi;
   wifi_auth_mode_t authMode;
+};
+
+struct ConfigMenuEntry {
+  const char* label;
+  const char* value;
 };
 
 
@@ -50,6 +64,8 @@ bool prevLightOffPressed = false;
 bool prevLightTimerPressed = false;
 bool prevDeveloperPressed = false;
 bool prevEncoderButtonPressed = false;
+uint32_t encoderButtonPressedAt = 0;
+bool encoderLongPressHandled = false;
 
 UiMode uiMode = UiMode::BootConnect;
 String wifiSsid;
@@ -59,6 +75,7 @@ bool wifiConnectTimedOut = false;
 uint32_t wifiConnectStartedAt = 0;
 uint32_t lastWifiStatusRefreshAt = 0;
 bool wifiConnectedScreenShown = false;
+uint32_t wifiConnectedShownAt = 0;
 bool otaStarted = false;
 int16_t wifiScanCount = -1;
 constexpr size_t kMaxStoredNetworks = 20;
@@ -72,9 +89,34 @@ size_t selectedCharIndex = 0;
 constexpr char kPasswordAlphabet[] =
     " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.@!?#$%&+=/:";
 String connectionStatusMessage;
+int32_t configMenuIndex = 0;
+constexpr ConfigMenuEntry kConfigMenuEntries[] = {
+    {"WiFi setup", "saved"},
+    {"Head colors", "later"},
+    {"Brightness", "later"},
+    {"Sensor", "later"},
+};
+constexpr size_t kConfigMenuEntryCount = sizeof(kConfigMenuEntries) / sizeof(kConfigMenuEntries[0]);
+constexpr uint32_t kEncoderLongPressMs = 700;
+constexpr float kExposureStepRatio = 1.41421356f;
+constexpr uint16_t kMaxExposureSeconds = 600;
+constexpr size_t kMaxExposureStepCount = 32;
+size_t exposureStepCount = 0;
+float exposureSeconds[kMaxExposureStepCount];
+int32_t exposureIndex = 0;
+int32_t contrastValue = 4;
+int32_t apertureValue = 0;
+ExposureFocus exposureFocus = ExposureFocus::Exposure;
+float contrastCorrectionTable[11] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
 
 void drawWifiConnectedUi();
 void ensureOtaStarted();
+void drawExposureModeUi();
+void drawConfigModeUi();
+void enterExposureMode();
+void enterConfigMode();
+void initializeExposureSteps();
+String formatExposureSeconds(float seconds);
 
 void setStatusLed(uint8_t red, uint8_t green, uint8_t blue) {
   statusLed.setPixelColor(0, statusLed.Color(red, green, blue));
@@ -165,6 +207,8 @@ void updateWifiStatusUi() {
       ensureOtaStarted();
       drawWifiConnectedUi();
       wifiConnectedScreenShown = true;
+      wifiConnectedShownAt = millis();
+      lastWifiStatusRefreshAt = millis();
     }
     return;
   }
@@ -299,6 +343,112 @@ void drawWifiConnectedUi() {
   tft.drawString("RSSI:", 8, 146, 2);
   tft.drawString(String(WiFi.RSSI()) + " dBm", 48, 146, 2);
   drawFooterLine("Credentials saved, OTA ready", TFT_GREEN);
+}
+
+void drawExposureModeUi() {
+  tft.setRotation(1);
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextSize(1);
+  tft.setTextFont(4);
+  tft.setTextColor(TFT_RED, TFT_BLACK);
+  tft.drawString("Darkroom controler", 8, 10, 4);
+
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.drawString("Expozice", 8, 48, 4);
+
+  const float correctedExposure = exposureSeconds[exposureIndex] * contrastCorrectionTable[contrastValue];
+
+  const uint16_t exposureBackground = (exposureFocus == ExposureFocus::Exposure) ? TFT_DARKGREY : TFT_BLACK;
+  const uint16_t contrastBackground = (exposureFocus == ExposureFocus::Contrast) ? TFT_DARKGREY : TFT_BLACK;
+  const uint16_t apertureBackground = (exposureFocus == ExposureFocus::Aperture) ? TFT_DARKGREY : TFT_BLACK;
+
+  tft.setTextFont(4);
+  tft.fillRect(0, 92, tft.width(), 34, exposureBackground);
+  tft.setTextColor((exposureFocus == ExposureFocus::Exposure) ? TFT_YELLOW : TFT_WHITE, exposureBackground);
+  tft.drawString("Cas:", 8, 96, 4);
+  tft.drawRightString(formatExposureSeconds(correctedExposure), tft.width() - 8, 96, 4);
+
+  tft.setTextFont(4);
+  tft.fillRect(0, 132, tft.width(), 34, contrastBackground);
+  tft.setTextColor((exposureFocus == ExposureFocus::Contrast) ? TFT_YELLOW : TFT_WHITE, contrastBackground);
+  tft.drawString("Kontrast:", 8, 136, 4);
+  tft.drawRightString(String(contrastValue), tft.width() - 8, 136, 4);
+
+  tft.setTextFont(4);
+  tft.fillRect(0, 172, tft.width(), 34, apertureBackground);
+  tft.setTextColor((exposureFocus == ExposureFocus::Aperture) ? TFT_YELLOW : TFT_WHITE, apertureBackground);
+  tft.drawString("Clona:", 8, 176, 4);
+  tft.drawRightString(String(apertureValue), tft.width() - 8, 176, 4);
+
+  drawFooterLine("Short=focus  Long=config", TFT_GREEN);
+}
+
+void drawConfigModeUi() {
+  tft.setRotation(1);
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextSize(1);
+  tft.setTextFont(4);
+  tft.setTextColor(TFT_RED, TFT_BLACK);
+  tft.drawString("Darkroom controler", 8, 10, 4);
+
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("Konfigurace", 8, 48, 4);
+
+  tft.setTextFont(2);
+  for (size_t i = 0; i < kConfigMenuEntryCount; ++i) {
+    const uint16_t background = (static_cast<int32_t>(i) == configMenuIndex) ? TFT_DARKGREY : TFT_BLACK;
+    const uint16_t color = (static_cast<int32_t>(i) == configMenuIndex) ? TFT_YELLOW : TFT_WHITE;
+    const int16_t y = 96 + static_cast<int16_t>(i) * 28;
+    tft.fillRect(0, y - 2, tft.width(), 24, background);
+    tft.setTextColor(color, background);
+    tft.drawString(kConfigMenuEntries[i].label, 8, y, 2);
+    tft.drawRightString(kConfigMenuEntries[i].value, tft.width() - 8, y, 2);
+  }
+
+  drawFooterLine("Rotary=select  Long=expozice", TFT_GREEN);
+}
+
+void enterExposureMode() {
+  uiMode = UiMode::ExposureMode;
+  drawExposureModeUi();
+}
+
+void enterConfigMode() {
+  uiMode = UiMode::ConfigMode;
+  drawConfigModeUi();
+}
+
+String formatExposureSeconds(float seconds) {
+  if (seconds < 10.0f) {
+    return String(seconds, 1) + " s";
+  }
+
+  const uint32_t roundedSeconds = static_cast<uint32_t>(seconds + 0.5f);
+  if (roundedSeconds < 60) {
+    return String(roundedSeconds) + " s";
+  }
+
+  const uint32_t minutes = roundedSeconds / 60;
+  const uint32_t remainingSeconds = roundedSeconds % 60;
+  if (remainingSeconds == 0) {
+    return String(minutes) + " min";
+  }
+
+  return String(minutes) + "m " + String(remainingSeconds) + "s";
+}
+
+void initializeExposureSteps() {
+  exposureStepCount = 0;
+  float value = 1.0f;
+  while (exposureStepCount < kMaxExposureStepCount && value <= static_cast<float>(kMaxExposureSeconds)) {
+    exposureSeconds[exposureStepCount++] = value;
+    value *= kExposureStepRatio;
+  }
+
+  if (exposureStepCount == 0) {
+    exposureSeconds[0] = 1.0f;
+    exposureStepCount = 1;
+  }
 }
 
 void drawWifiScanUi() {
@@ -453,6 +603,8 @@ void beginWifiConnectWithEnteredCredentials() {
       wifiConnectedScreenShown = true;
       ensureOtaStarted();
       drawWifiConnectedUi();
+      wifiConnectedShownAt = millis();
+      lastWifiStatusRefreshAt = millis();
       return;
     }
 
@@ -541,6 +693,24 @@ void handleEncoder() {
     if (uiMode == UiMode::WifiScanResult && networkCount > 0) {
       selectedNetworkIndex = (selectedNetworkIndex + 1) % static_cast<int32_t>(networkCount);
       drawWifiScanResultUi();
+    } else if (uiMode == UiMode::ConfigMode) {
+      configMenuIndex = (configMenuIndex + 1) % static_cast<int32_t>(kConfigMenuEntryCount);
+      drawConfigModeUi();
+    } else if (uiMode == UiMode::ExposureMode) {
+      if (exposureFocus == ExposureFocus::Exposure) {
+        if (exposureIndex < static_cast<int32_t>(exposureStepCount) - 1) {
+          ++exposureIndex;
+        }
+      } else if (exposureFocus == ExposureFocus::Contrast) {
+        if (contrastValue < 10) {
+          ++contrastValue;
+        }
+      } else if (exposureFocus == ExposureFocus::Aperture) {
+        if (apertureValue < 6) {
+          ++apertureValue;
+        }
+      }
+      drawExposureModeUi();
     } else if (uiMode == UiMode::WifiPasswordEntry) {
       moveSelectedCharacter(1);
       drawPasswordEntryUi();
@@ -553,6 +723,27 @@ void handleEncoder() {
         selectedNetworkIndex = static_cast<int32_t>(networkCount) - 1;
       }
       drawWifiScanResultUi();
+    } else if (uiMode == UiMode::ConfigMode) {
+      --configMenuIndex;
+      if (configMenuIndex < 0) {
+        configMenuIndex = static_cast<int32_t>(kConfigMenuEntryCount) - 1;
+      }
+      drawConfigModeUi();
+    } else if (uiMode == UiMode::ExposureMode) {
+      if (exposureFocus == ExposureFocus::Exposure) {
+        if (exposureIndex > 0) {
+          --exposureIndex;
+        }
+      } else if (exposureFocus == ExposureFocus::Contrast) {
+        if (contrastValue > 0) {
+          --contrastValue;
+        }
+      } else if (exposureFocus == ExposureFocus::Aperture) {
+        if (apertureValue > 0) {
+          --apertureValue;
+        }
+      }
+      drawExposureModeUi();
     } else if (uiMode == UiMode::WifiPasswordEntry) {
       moveSelectedCharacter(-1);
       drawPasswordEntryUi();
@@ -561,14 +752,52 @@ void handleEncoder() {
 
   const bool encoderButtonPressed = DarkroomHw::isEncoderButtonPressed();
   if (encoderButtonPressed && !prevEncoderButtonPressed) {
-    DarkroomHw::startBeep(3520, kClickToneDurationMs);
     if (uiMode == UiMode::WifiScanResult && networkCount > 0) {
+      DarkroomHw::startBeep(3520, kClickToneDurationMs);
       beginPasswordEntry();
     } else if (uiMode == UiMode::WifiPasswordEntry) {
+      DarkroomHw::startBeep(3520, kClickToneDurationMs);
       insertSelectedCharacter();
       drawPasswordEntryUi();
+    } else if (uiMode == UiMode::ExposureMode || uiMode == UiMode::ConfigMode) {
+      encoderButtonPressedAt = millis();
+      encoderLongPressHandled = false;
     }
-  } 
+  }
+
+  if (encoderButtonPressed &&
+      !encoderLongPressHandled &&
+      (uiMode == UiMode::ExposureMode || uiMode == UiMode::ConfigMode) &&
+      (millis() - encoderButtonPressedAt) >= kEncoderLongPressMs) {
+    DarkroomHw::startBeep(1760, kClickToneDurationMs);
+    encoderLongPressHandled = true;
+    if (uiMode == UiMode::ExposureMode) {
+      enterConfigMode();
+    } else {
+      enterExposureMode();
+    }
+  }
+
+  if (!encoderButtonPressed && prevEncoderButtonPressed) {
+    if ((uiMode == UiMode::ExposureMode || uiMode == UiMode::ConfigMode) && !encoderLongPressHandled) {
+      DarkroomHw::startBeep(3520, kClickToneDurationMs);
+      if (uiMode == UiMode::ExposureMode) {
+        if (exposureFocus == ExposureFocus::Exposure) {
+          exposureFocus = ExposureFocus::Contrast;
+        } else if (exposureFocus == ExposureFocus::Contrast) {
+          exposureFocus = ExposureFocus::Aperture;
+        } else {
+          exposureFocus = ExposureFocus::Exposure;
+        }
+        drawExposureModeUi();
+      } else if (uiMode == UiMode::ConfigMode) {
+        drawFooterLine(String(kConfigMenuEntries[configMenuIndex].label) + " later", TFT_YELLOW);
+      }
+    }
+
+    encoderLongPressHandled = false;
+    encoderButtonPressedAt = 0;
+  }
 
   prevEncoderButtonPressed = encoderButtonPressed;
 }
@@ -578,6 +807,7 @@ void handleEncoder() {
 void setup() {
   Serial.begin(115200);
 
+  initializeExposureSteps();
   DarkroomHw::initHardware();
   loadWifiCredentials();
   beginWifiConnectIfNeeded();
@@ -611,6 +841,11 @@ void loop() {
   DarkroomHw::updateBeep();
   if (otaStarted) {
     ArduinoOTA.handle();
+  }
+
+  if (uiMode == UiMode::WifiConnected && wifiConnectedScreenShown && (millis() - wifiConnectedShownAt) >= 2000) {
+    wifiConnectedScreenShown = false;
+    enterExposureMode();
   }
 
   if (wifiCredentialsValid && !wifiConnectTimedOut && WiFi.status() != WL_CONNECTED) {

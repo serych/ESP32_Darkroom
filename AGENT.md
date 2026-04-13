@@ -57,15 +57,53 @@ As of the current workspace state:
 - The firmware initializes serial at `115200`.
 - It initializes a hardware abstraction layer in `include/darkroom_hw.h` and `src/darkroom_hw.cpp`.
 - The HAL exposes helper functions for RGB head PWM, darkroom red PWM, display backlight PWM, buttons backlight PWM, button reads, encoder reads, and both blocking and non-blocking beeper tone output.
-- The current `src/main.cpp` is a dedicated hardware test application, not the final timer UI.
+- The current `src/main.cpp` is no longer the original hardware-test application; it now contains the first working timer UI with WiFi setup, OTA, exposure mode, and config-mode scaffolding.
 - On startup it plays three tones and briefly drives the RGB light head and status LED through red, green, and blue.
-- The TFT display is initialized in landscape orientation and shows a `Testing hardware` screen with live values for button backlight PWM, display backlight PWM, encoder value, and the last input event.
-- `kButtonLightOff` turns the status LED and RGB light head red while held.
-- `kButtonLightOn` turns the status LED and RGB light head green while held, and each press advances the button-backlight PWM through a logarithmic-style table.
-- `kButtonDeveloperTimer` turns the status LED and RGB light head blue while held.
-- `kButtonLightTimer` is still read and beeped for input testing, but it does not currently drive the RGB light head.
-- The encoder increments and decrements a displayed test variable and plays short click tones for both directions.
-- The encoder push button advances the display-backlight PWM through the same logarithmic-style table.
+- The TFT display is initialized in landscape orientation and uses the larger font already validated on hardware.
+- After boot, if WiFi credentials are stored in NVS, the device attempts to connect for `30 s` and shows the countdown on screen.
+- If no credentials are stored, or if the connection times out, the device enters WiFi setup mode, scans visible SSIDs, and shows the scan results on the display.
+- The WiFi list is browsed with the rotary encoder and an SSID is selected with the encoder push button.
+- Password entry is implemented on-device:
+  - rotary encoder selects a character
+  - encoder button inserts the selected character
+  - `Light On` moves the cursor left
+  - `Light Off` deletes at the cursor
+  - `Light Timer` moves the cursor right
+  - `Developer` commits the password and starts connection
+- WiFi credentials are saved in NVS using `Preferences`.
+- After successful connection the display shows SSID, IP address, and RSSI, and Arduino OTA is started.
+- `platformio.ini` already contains commented OTA upload settings intended to be uncommented after the first serial upload of OTA-enabled firmware.
+- After the short post-connect screen, the normal working screen is `Expozice`.
+- A long press of the encoder button switches between `Expozice` and `Konfigurace`.
+- In `Expozice`, a short press of the encoder button cycles focus between exposure time, contrast, and aperture.
+- In `Expozice`, rotating the encoder edits the currently focused value:
+  - exposure time follows a logarithmic sequence from `1.0 s` upward by roughly `sqrt(2)` steps up to `10 min`
+  - contrast range is `0..10`
+  - aperture range is `0..6`
+- Exposure time shown on screen is already prepared for multiplication by a contrast correction coefficient table.
+- A contrast correction coefficient table for `0..10` exists in code and is currently initialized to neutral `1.0` values.
+- A contrast-to-RGB table for `0..10` exists in code and is currently initialized to `{3,5,5}` for all entries.
+- RGB table entries are interpreted as logarithmic PWM indices for the 10-bit head output with the mapping:
+  - `0 -> 0`
+  - `1 -> 2`
+  - `2 -> 4`
+  - `3 -> 8`
+  - ...
+  - `10 -> 1023`
+- Simple timed exposure is implemented:
+  - `Light Timer` starts exposure when no exposure is running
+  - `Light Off` stops a running exposure early
+  - the RGB head is turned on only during the active exposure and uses the color from the current contrast RGB table entry
+- During exposure the remaining time is updated on a larger dedicated status line without redrawing the entire screen.
+- Exposure end or manual stop plays a distinct double beep using the user-tuned end-tone constants in `src/main.cpp`.
+- Manual latched light modes are also implemented in exposure mode:
+  - white light color is currently configurable in code and initialized to `{10,10,10}`
+  - red light color is currently configurable in code and initialized to `{10,0,0}`
+  - `Light On` turns on the white light if no exposure is running
+  - `Light Off` turns off the white light
+  - pressing `Light Off` and then `Light On` together arms the red-light chord; releasing `Light On` turns on the red light
+  - the next `Light Off` press turns the red light off
+- The config screen exists as a navigable placeholder menu but individual configuration item editors are not implemented yet.
 - `DarkroomHw::updateBeep()` is expected to be called from `loop()` so short click sounds can end without blocking input scanning.
 - The currently tested hardware is working, including the RGB light head outputs on `GPIO25`, `GPIO26`, and `GPIO27`.
 
@@ -152,9 +190,9 @@ If hardware is unavailable, state clearly that only static or build-level verifi
 
 # Development steps
 0. creation of HW layer and testing HW - done
-1. WiFi connectivity and implementation of OTA
-2. working modes and menu
-3. exposure mode, timer, apperture, contrast, display values and basic buttons functions
+1. WiFi connectivity and implementation of OTA - done
+2. working modes and menu - done
+3. exposure mode, timer, apperture, contrast, display values and basic buttons functions - done
 4. light head colors definitions, contrast - color - exposure correction table
 5. red light and backlights values settings
 6. VEML7700 measurements - display min, max values
@@ -168,8 +206,18 @@ If hardware is unavailable, state clearly that only static or build-level verifi
 - let the user choose SSID and enter the password using virtual keyboard on the display, rotary encoder to choose character and other buttons to move the cursor, delete the character and enter commit the password written (ON = <, OFF = delete, Timer = > and Develop = commit)
 - write the values (SSID and passwd) to non volatile memory
 - connect to the choosen AP, show IP and signal strength on the display and begin the OTA
-- (choosing of SSID will later also be one of the config menu items) 
+- (choosing of SSID will later also be one of the config menu items)
+- Status: implemented and working on hardware, including OTA upload after first serial flash.
 ## 2. Working modes and menu
 - There will be two main modes of operation: Exposure mode and Config mode
-    - In exposure mode it will be posible to set exposure time, contrast and apperture using rottary encoder and buttons will be used to switch light head ON, OFF and start the timer 
-    - In config mode the device will show the menu and values which will be set by user (brightnesses, colors of head light etc.) 
+    - In exposure mode it will be posible to set exposure time, contrast and apperture using rottary encoder and buttons will be used to switch light head ON, OFF and start the timer
+    - In config mode the device will show the menu and values which will be set by user (brightnesses, colors of head light etc.)
+- Status: implemented in the current branch as `Expozice` default mode and `Konfigurace` entered by long press of the encoder button. Config item editing is still pending.
+## 3. Exposure mode, timer, apperture, contrast, display values and basic buttons functions
+- `Expozice` is the default post-connect screen.
+- Short encoder press cycles focus between exposure time, contrast, and aperture.
+- Rotary movement edits the focused value.
+- Timed exposure is started by `Light Timer` and can be stopped early by `Light Off`.
+- The light head is driven during exposure using the current contrast RGB table entry.
+- Manual white and red light modes for non-exposure work are already wired as described in the current firmware behavior section.
+- Status: implemented and hardware-tested at the current basic level.

@@ -193,8 +193,8 @@ If hardware is unavailable, state clearly that only static or build-level verifi
 1. WiFi connectivity and implementation of OTA - done
 2. working modes and menu - done
 3. exposure mode, timer, apperture, contrast, display values and basic buttons functions - done
-4. light head colors definitions, contrast - color - exposure correction table
-5. red light and backlights values settings
+4. config menu, red light and backlights values settings
+5. light head colors definitions, contrast - color - exposure correction table
 6. VEML7700 measurements - display min, max values
 7. autoexposure implementation
 8. web interface
@@ -221,3 +221,15 @@ If hardware is unavailable, state clearly that only static or build-level verifi
 - The light head is driven during exposure using the current contrast RGB table entry.
 - Manual white and red light modes for non-exposure work are already wired as described in the current firmware behavior section.
 - Status: implemented and hardware-tested at the current basic level.
+## 4. Config menu, darkroom lighting settings
+- Menu 'Konfigurace' with subitems:
+    - 'Osvětlení' 
+    - 'Kontrast/Expozice'
+    - 'Sit'
+    - 'Zpet' - back to 'Expozice'
+In 'Osvetleni' there will be 3 items:
+- 'Cervene svetlo' - value 0 to 7 PWM with 1b shifted from the right to the left (1, 3, 7, 15, ... 255) -> GPIO13
+- 'Osvetleni tlacitek' - the same principle -> GPIO14
+- 'Osvetleni displeje' - the same -> GPIO17
+- 'Zpet' - parent menu level  
+

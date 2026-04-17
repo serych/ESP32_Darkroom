@@ -35,6 +35,10 @@ constexpr char kConfigDisplayLightKey[] = "disp_light";
 constexpr char kConfigExposureKey[] = "exposure";
 constexpr char kConfigContrastKey[] = "contrast";
 constexpr char kConfigApertureKey[] = "aperture";
+constexpr char kConfigCorrectionTableKey[] = "corr_tbl";
+constexpr char kConfigContrastRgbKey[] = "rgb_tbl";
+constexpr char kConfigWhiteLightKey[] = "white_rgb";
+constexpr char kConfigRedHeadKey[] = "red_rgb";
 enum class UiMode : uint8_t {
   BootConnect,
   WifiScan,
@@ -74,6 +78,26 @@ enum class LightOutputMode : uint8_t {
 enum class ConfigMenuScreen : uint8_t {
   Root,
   Lighting,
+  ContrastExposure,
+  ContrastTableEditor,
+  WhiteLightEditor,
+  RedLightEditor,
+};
+
+enum class ContrastEditorField : uint8_t {
+  ContrastStep,
+  Correction,
+  Red,
+  Green,
+  Blue,
+  Back,
+};
+
+enum class ColorEditorField : uint8_t {
+  Red,
+  Green,
+  Blue,
+  Back,
 };
 
 
@@ -129,6 +153,13 @@ constexpr const char* kLightingItems[] = {
     "Zpet",
 };
 constexpr size_t kLightingItemCount = sizeof(kLightingItems) / sizeof(kLightingItems[0]);
+constexpr const char* kContrastExposureItems[] = {
+    "Barvy + korekce",
+    "Bile svetlo",
+    "Cervene svetlo",
+    "Zpet",
+};
+constexpr size_t kContrastExposureItemCount = sizeof(kContrastExposureItems) / sizeof(kContrastExposureItems[0]);
 constexpr uint32_t kEncoderLongPressMs = 700;
 constexpr float kExposureStepRatio = 1.41421356f;
 constexpr uint16_t kMaxExposureSeconds = 600;
@@ -155,6 +186,10 @@ bool redChordArmed = false;
 uint8_t darkroomRedLevel = 0;
 uint8_t buttonsBacklightLevel = 0;
 uint8_t displayBacklightLevel = 6;
+int32_t configContrastExposureIndex = 0;
+int32_t configContrastStepIndex = 0;
+ContrastEditorField contrastEditorField = ContrastEditorField::ContrastStep;
+ColorEditorField colorEditorField = ColorEditorField::Red;
 
 void drawWifiConnectedUi();
 void ensureOtaStarted();
@@ -176,6 +211,8 @@ void applyAuxOutputs();
 void drawConfigFooter(const String& text, uint16_t color);
 void loadConfigValues();
 bool saveConfigValues();
+void applyConfigPreview();
+String formatCorrectionValue(float value);
 
 void setStatusLed(uint8_t red, uint8_t green, uint8_t blue) {
   statusLed.setPixelColor(0, statusLed.Color(red, green, blue));
@@ -233,6 +270,10 @@ void loadConfigValues() {
   exposureIndex = preferences.getInt(kConfigExposureKey, exposureIndex);
   contrastValue = preferences.getInt(kConfigContrastKey, contrastValue);
   apertureValue = preferences.getInt(kConfigApertureKey, apertureValue);
+  preferences.getBytes(kConfigCorrectionTableKey, contrastCorrectionTable, sizeof(contrastCorrectionTable));
+  preferences.getBytes(kConfigContrastRgbKey, contrastRgbTable, sizeof(contrastRgbTable));
+  preferences.getBytes(kConfigWhiteLightKey, &whiteLightSetting, sizeof(whiteLightSetting));
+  preferences.getBytes(kConfigRedHeadKey, &redLightSetting, sizeof(redLightSetting));
   preferences.end();
 
   if (darkroomRedLevel > 7) {
@@ -259,6 +300,43 @@ void loadConfigValues() {
   } else if (apertureValue > 6) {
     apertureValue = 6;
   }
+
+  for (size_t i = 0; i < 11; ++i) {
+    if (contrastCorrectionTable[i] < 0.0f) {
+      contrastCorrectionTable[i] = 0.0f;
+    } else if (contrastCorrectionTable[i] > 4.0f) {
+      contrastCorrectionTable[i] = 4.0f;
+    }
+
+    if (contrastRgbTable[i].redStep > 10) {
+      contrastRgbTable[i].redStep = 10;
+    }
+    if (contrastRgbTable[i].greenStep > 10) {
+      contrastRgbTable[i].greenStep = 10;
+    }
+    if (contrastRgbTable[i].blueStep > 10) {
+      contrastRgbTable[i].blueStep = 10;
+    }
+  }
+
+  if (whiteLightSetting.redStep > 10) {
+    whiteLightSetting.redStep = 10;
+  }
+  if (whiteLightSetting.greenStep > 10) {
+    whiteLightSetting.greenStep = 10;
+  }
+  if (whiteLightSetting.blueStep > 10) {
+    whiteLightSetting.blueStep = 10;
+  }
+  if (redLightSetting.redStep > 10) {
+    redLightSetting.redStep = 10;
+  }
+  if (redLightSetting.greenStep > 10) {
+    redLightSetting.greenStep = 10;
+  }
+  if (redLightSetting.blueStep > 10) {
+    redLightSetting.blueStep = 10;
+  }
 }
 
 bool saveConfigValues() {
@@ -271,7 +349,11 @@ bool saveConfigValues() {
                   preferences.putUChar(kConfigDisplayLightKey, displayBacklightLevel) > 0 &&
                   preferences.putInt(kConfigExposureKey, exposureIndex) > 0 &&
                   preferences.putInt(kConfigContrastKey, contrastValue) > 0 &&
-                  preferences.putInt(kConfigApertureKey, apertureValue) > 0;
+                  preferences.putInt(kConfigApertureKey, apertureValue) > 0 &&
+                  preferences.putBytes(kConfigCorrectionTableKey, contrastCorrectionTable, sizeof(contrastCorrectionTable)) == sizeof(contrastCorrectionTable) &&
+                  preferences.putBytes(kConfigContrastRgbKey, contrastRgbTable, sizeof(contrastRgbTable)) == sizeof(contrastRgbTable) &&
+                  preferences.putBytes(kConfigWhiteLightKey, &whiteLightSetting, sizeof(whiteLightSetting)) == sizeof(whiteLightSetting) &&
+                  preferences.putBytes(kConfigRedHeadKey, &redLightSetting, sizeof(redLightSetting)) == sizeof(redLightSetting);
   preferences.end();
   return ok;
 }
@@ -547,7 +629,7 @@ void drawConfigModeUi() {
       tft.drawString(kConfigRootItems[i], 8, y, 2);
     }
     drawConfigFooter("Rotary=vyber  Short=otevri  Long=expozice", TFT_GREEN);
-  } else {
+  } else if (configMenuScreen == ConfigMenuScreen::Lighting) {
     for (size_t i = 0; i < kLightingItemCount; ++i) {
       const uint16_t background = (static_cast<int32_t>(i) == configLightingIndex) ? TFT_DARKGREY : TFT_BLACK;
       const uint16_t color = (static_cast<int32_t>(i) == configLightingIndex) ? TFT_YELLOW : TFT_WHITE;
@@ -570,7 +652,88 @@ void drawConfigModeUi() {
     } else {
       drawConfigFooter("Rotary=vyber  Short=uprav/zpet", TFT_GREEN);
     }
+  } else if (configMenuScreen == ConfigMenuScreen::ContrastExposure) {
+    for (size_t i = 0; i < kContrastExposureItemCount; ++i) {
+      const uint16_t background = (static_cast<int32_t>(i) == configContrastExposureIndex) ? TFT_DARKGREY : TFT_BLACK;
+      const uint16_t color = (static_cast<int32_t>(i) == configContrastExposureIndex) ? TFT_YELLOW : TFT_WHITE;
+      const int16_t y = 96 + static_cast<int16_t>(i) * 28;
+      tft.fillRect(0, y - 2, tft.width(), 24, background);
+      tft.setTextColor(color, background);
+      tft.drawString(kContrastExposureItems[i], 8, y, 2);
+    }
+    drawConfigFooter("Rotary=vyber  Short=otevri/zpet", TFT_GREEN);
+  } else if (configMenuScreen == ConfigMenuScreen::ContrastTableEditor) {
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString("Barvy + korekce", 8, 86, 2);
+
+    const uint16_t contrastBackground = (contrastEditorField == ContrastEditorField::ContrastStep) ? TFT_DARKGREY : TFT_BLACK;
+    const uint16_t correctionBackground = (contrastEditorField == ContrastEditorField::Correction) ? TFT_DARKGREY : TFT_BLACK;
+    const uint16_t redBackground = (contrastEditorField == ContrastEditorField::Red) ? TFT_DARKGREY : TFT_BLACK;
+    const uint16_t greenBackground = (contrastEditorField == ContrastEditorField::Green) ? TFT_DARKGREY : TFT_BLACK;
+    const uint16_t blueBackground = (contrastEditorField == ContrastEditorField::Blue) ? TFT_DARKGREY : TFT_BLACK;
+    const uint16_t backBackground = (contrastEditorField == ContrastEditorField::Back) ? TFT_DARKGREY : TFT_BLACK;
+
+    tft.fillRect(0, 108, tft.width(), 24, contrastBackground);
+    tft.setTextColor((contrastEditorField == ContrastEditorField::ContrastStep) ? TFT_YELLOW : TFT_WHITE, contrastBackground);
+    tft.drawString("Kontrast:", 8, 112, 2);
+    tft.drawRightString(String(configContrastStepIndex), tft.width() - 8, 112, 2);
+
+    tft.fillRect(0, 134, tft.width(), 24, correctionBackground);
+    tft.setTextColor((contrastEditorField == ContrastEditorField::Correction) ? TFT_YELLOW : TFT_WHITE, correctionBackground);
+    tft.drawString("Korekce:", 8, 138, 2);
+    tft.drawRightString(formatCorrectionValue(contrastCorrectionTable[configContrastStepIndex]), tft.width() - 8, 138, 2);
+
+    tft.fillRect(0, 160, tft.width(), 24, redBackground);
+    tft.setTextColor((contrastEditorField == ContrastEditorField::Red) ? TFT_YELLOW : TFT_WHITE, redBackground);
+    tft.drawString("R:", 8, 164, 2);
+    tft.drawRightString(String(contrastRgbTable[configContrastStepIndex].redStep), 74, 164, 2);
+
+    tft.fillRect(78, 160, 74, 24, greenBackground);
+    tft.setTextColor((contrastEditorField == ContrastEditorField::Green) ? TFT_YELLOW : TFT_WHITE, greenBackground);
+    tft.drawString("G:", 82, 164, 2);
+    tft.drawRightString(String(contrastRgbTable[configContrastStepIndex].greenStep), 148, 164, 2);
+
+    tft.fillRect(156, 160, 84, 24, blueBackground);
+    tft.setTextColor((contrastEditorField == ContrastEditorField::Blue) ? TFT_YELLOW : TFT_WHITE, blueBackground);
+    tft.drawString("B:", 160, 164, 2);
+    tft.drawRightString(String(contrastRgbTable[configContrastStepIndex].blueStep), 236, 164, 2);
+
+    tft.fillRect(0, 188, tft.width(), 24, backBackground);
+    tft.setTextColor((contrastEditorField == ContrastEditorField::Back) ? TFT_YELLOW : TFT_WHITE, backBackground);
+    tft.drawString("Zpet", 8, 192, 2);
+    drawConfigFooter(configEditingValue ? "Rotary=hodnota  Short=uloz" : "Rotary=vyber  Short=uprav/zpet", configEditingValue ? TFT_YELLOW : TFT_GREEN);
+  } else if (configMenuScreen == ConfigMenuScreen::WhiteLightEditor || configMenuScreen == ConfigMenuScreen::RedLightEditor) {
+    ContrastRgbSetting preview = (configMenuScreen == ConfigMenuScreen::WhiteLightEditor) ? whiteLightSetting : redLightSetting;
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString((configMenuScreen == ConfigMenuScreen::WhiteLightEditor) ? "Bile svetlo" : "Cervene svetlo", 8, 86, 2);
+
+    const uint16_t redBackground = (colorEditorField == ColorEditorField::Red) ? TFT_DARKGREY : TFT_BLACK;
+    const uint16_t greenBackground = (colorEditorField == ColorEditorField::Green) ? TFT_DARKGREY : TFT_BLACK;
+    const uint16_t blueBackground = (colorEditorField == ColorEditorField::Blue) ? TFT_DARKGREY : TFT_BLACK;
+    const uint16_t backBackground = (colorEditorField == ColorEditorField::Back) ? TFT_DARKGREY : TFT_BLACK;
+
+    tft.fillRect(0, 132, 74, 24, redBackground);
+    tft.setTextColor((colorEditorField == ColorEditorField::Red) ? TFT_YELLOW : TFT_WHITE, redBackground);
+    tft.drawString("R:", 8, 136, 2);
+    tft.drawRightString(String(preview.redStep), 70, 136, 2);
+
+    tft.fillRect(78, 132, 74, 24, greenBackground);
+    tft.setTextColor((colorEditorField == ColorEditorField::Green) ? TFT_YELLOW : TFT_WHITE, greenBackground);
+    tft.drawString("G:", 82, 136, 2);
+    tft.drawRightString(String(preview.greenStep), 148, 136, 2);
+
+    tft.fillRect(156, 132, 84, 24, blueBackground);
+    tft.setTextColor((colorEditorField == ColorEditorField::Blue) ? TFT_YELLOW : TFT_WHITE, blueBackground);
+    tft.drawString("B:", 160, 136, 2);
+    tft.drawRightString(String(preview.blueStep), 236, 136, 2);
+
+    tft.fillRect(0, 168, tft.width(), 24, backBackground);
+    tft.setTextColor((colorEditorField == ColorEditorField::Back) ? TFT_YELLOW : TFT_WHITE, backBackground);
+    tft.drawString("Zpet", 8, 172, 2);
+    drawConfigFooter(configEditingValue ? "Rotary=hodnota  Short=uloz" : "Rotary=vyber  Short=uprav/zpet", configEditingValue ? TFT_YELLOW : TFT_GREEN);
   }
+
+  applyConfigPreview();
 }
 
 void enterExposureMode() {
@@ -642,6 +805,52 @@ void applyAuxOutputs() {
   DarkroomHw::setDarkroomRedLight(pwmFromAuxLevel(darkroomRedLevel));
   DarkroomHw::setButtonsBacklight(pwmFromAuxLevel(buttonsBacklightLevel));
   DarkroomHw::setDisplayBacklight(pwmFromAuxLevel(displayBacklightLevel));
+}
+
+String formatCorrectionValue(float value) {
+  return String(value, 2);
+}
+
+void applyConfigPreview() {
+  if (uiMode != UiMode::ConfigMode) {
+    return;
+  }
+
+  if (configMenuScreen == ConfigMenuScreen::ContrastTableEditor) {
+    const ContrastRgbSetting& rgb = contrastRgbTable[configContrastStepIndex];
+    const uint16_t red = pwmFromLogStep(rgb.redStep);
+    const uint16_t green = pwmFromLogStep(rgb.greenStep);
+    const uint16_t blue = pwmFromLogStep(rgb.blueStep);
+    const uint8_t statusRed = static_cast<uint8_t>((red * kLedPreviewBrightness) / kLightHeadMax);
+    const uint8_t statusGreen = static_cast<uint8_t>((green * kLedPreviewBrightness) / kLightHeadMax);
+    const uint8_t statusBlue = static_cast<uint8_t>((blue * kLedPreviewBrightness) / kLightHeadMax);
+    setPreviewColor(red, green, blue, statusRed, statusGreen, statusBlue);
+    return;
+  }
+
+  if (configMenuScreen == ConfigMenuScreen::WhiteLightEditor) {
+    const uint16_t red = pwmFromLogStep(whiteLightSetting.redStep);
+    const uint16_t green = pwmFromLogStep(whiteLightSetting.greenStep);
+    const uint16_t blue = pwmFromLogStep(whiteLightSetting.blueStep);
+    const uint8_t statusRed = static_cast<uint8_t>((red * kLedPreviewBrightness) / kLightHeadMax);
+    const uint8_t statusGreen = static_cast<uint8_t>((green * kLedPreviewBrightness) / kLightHeadMax);
+    const uint8_t statusBlue = static_cast<uint8_t>((blue * kLedPreviewBrightness) / kLightHeadMax);
+    setPreviewColor(red, green, blue, statusRed, statusGreen, statusBlue);
+    return;
+  }
+
+  if (configMenuScreen == ConfigMenuScreen::RedLightEditor) {
+    const uint16_t red = pwmFromLogStep(redLightSetting.redStep);
+    const uint16_t green = pwmFromLogStep(redLightSetting.greenStep);
+    const uint16_t blue = pwmFromLogStep(redLightSetting.blueStep);
+    const uint8_t statusRed = static_cast<uint8_t>((red * kLedPreviewBrightness) / kLightHeadMax);
+    const uint8_t statusGreen = static_cast<uint8_t>((green * kLedPreviewBrightness) / kLightHeadMax);
+    const uint8_t statusBlue = static_cast<uint8_t>((blue * kLedPreviewBrightness) / kLightHeadMax);
+    setPreviewColor(red, green, blue, statusRed, statusGreen, statusBlue);
+    return;
+  }
+
+  applyLightOutputMode();
 }
 
 void applyExposureLightOutput() {
@@ -910,7 +1119,7 @@ void playStartupSequence() {
 
 void applyPressedColor(const DarkroomHw::ButtonState& buttons) {
   (void)buttons;
-  applyLightOutputMode();
+  applyConfigPreview();
 }
 
 void handleButtonEdges(const DarkroomHw::ButtonState& buttons) {
@@ -1002,7 +1211,7 @@ void handleEncoder() {
     } else if (uiMode == UiMode::ConfigMode) {
       if (configMenuScreen == ConfigMenuScreen::Root) {
         configRootIndex = (configRootIndex + 1) % static_cast<int32_t>(kConfigRootItemCount);
-      } else if (configEditingValue) {
+      } else if (configMenuScreen == ConfigMenuScreen::Lighting && configEditingValue) {
         if (configLightingIndex == 0 && darkroomRedLevel < 7) {
           ++darkroomRedLevel;
           applyAuxOutputs();
@@ -1016,8 +1225,55 @@ void handleEncoder() {
           applyAuxOutputs();
           saveConfigValues();
         }
-      } else {
+      } else if (configMenuScreen == ConfigMenuScreen::Lighting) {
         configLightingIndex = (configLightingIndex + 1) % static_cast<int32_t>(kLightingItemCount);
+      } else if (configMenuScreen == ConfigMenuScreen::ContrastExposure) {
+        configContrastExposureIndex = (configContrastExposureIndex + 1) % static_cast<int32_t>(kContrastExposureItemCount);
+      } else if (configMenuScreen == ConfigMenuScreen::ContrastTableEditor) {
+        if (!configEditingValue) {
+          contrastEditorField = static_cast<ContrastEditorField>((static_cast<uint8_t>(contrastEditorField) + 1) % 6);
+        } else if (contrastEditorField == ContrastEditorField::ContrastStep) {
+          configContrastStepIndex = (configContrastStepIndex + 1) % 11;
+        } else if (contrastEditorField == ContrastEditorField::Correction) {
+          if (contrastCorrectionTable[configContrastStepIndex] < 4.0f) {
+            contrastCorrectionTable[configContrastStepIndex] += 0.01f;
+            if (contrastCorrectionTable[configContrastStepIndex] > 4.0f) {
+              contrastCorrectionTable[configContrastStepIndex] = 4.0f;
+            }
+          }
+        } else if (contrastEditorField == ContrastEditorField::Red) {
+          if (contrastRgbTable[configContrastStepIndex].redStep < 10) {
+            ++contrastRgbTable[configContrastStepIndex].redStep;
+          }
+        } else if (contrastEditorField == ContrastEditorField::Green) {
+          if (contrastRgbTable[configContrastStepIndex].greenStep < 10) {
+            ++contrastRgbTable[configContrastStepIndex].greenStep;
+          }
+        } else if (contrastEditorField == ContrastEditorField::Blue) {
+          if (contrastRgbTable[configContrastStepIndex].blueStep < 10) {
+            ++contrastRgbTable[configContrastStepIndex].blueStep;
+          }
+        }
+      } else if (configMenuScreen == ConfigMenuScreen::WhiteLightEditor) {
+        if (!configEditingValue) {
+          colorEditorField = static_cast<ColorEditorField>((static_cast<uint8_t>(colorEditorField) + 1) % 4);
+        } else if (colorEditorField == ColorEditorField::Red && whiteLightSetting.redStep < 10) {
+          ++whiteLightSetting.redStep;
+        } else if (colorEditorField == ColorEditorField::Green && whiteLightSetting.greenStep < 10) {
+          ++whiteLightSetting.greenStep;
+        } else if (colorEditorField == ColorEditorField::Blue && whiteLightSetting.blueStep < 10) {
+          ++whiteLightSetting.blueStep;
+        }
+      } else if (configMenuScreen == ConfigMenuScreen::RedLightEditor) {
+        if (!configEditingValue) {
+          colorEditorField = static_cast<ColorEditorField>((static_cast<uint8_t>(colorEditorField) + 1) % 4);
+        } else if (colorEditorField == ColorEditorField::Red && redLightSetting.redStep < 10) {
+          ++redLightSetting.redStep;
+        } else if (colorEditorField == ColorEditorField::Green && redLightSetting.greenStep < 10) {
+          ++redLightSetting.greenStep;
+        } else if (colorEditorField == ColorEditorField::Blue && redLightSetting.blueStep < 10) {
+          ++redLightSetting.blueStep;
+        }
       }
       drawConfigModeUi();
     } else if (uiMode == UiMode::ExposureMode) {
@@ -1056,7 +1312,7 @@ void handleEncoder() {
         if (configRootIndex < 0) {
           configRootIndex = static_cast<int32_t>(kConfigRootItemCount) - 1;
         }
-      } else if (configEditingValue) {
+      } else if (configMenuScreen == ConfigMenuScreen::Lighting && configEditingValue) {
         if (configLightingIndex == 0 && darkroomRedLevel > 0) {
           --darkroomRedLevel;
           applyAuxOutputs();
@@ -1070,10 +1326,75 @@ void handleEncoder() {
           applyAuxOutputs();
           saveConfigValues();
         }
-      } else {
+      } else if (configMenuScreen == ConfigMenuScreen::Lighting) {
         --configLightingIndex;
         if (configLightingIndex < 0) {
           configLightingIndex = static_cast<int32_t>(kLightingItemCount) - 1;
+        }
+      } else if (configMenuScreen == ConfigMenuScreen::ContrastExposure) {
+        --configContrastExposureIndex;
+        if (configContrastExposureIndex < 0) {
+          configContrastExposureIndex = static_cast<int32_t>(kContrastExposureItemCount) - 1;
+        }
+      } else if (configMenuScreen == ConfigMenuScreen::ContrastTableEditor) {
+        if (!configEditingValue) {
+          int32_t index = static_cast<int32_t>(contrastEditorField) - 1;
+          if (index < 0) {
+            index = 5;
+          }
+          contrastEditorField = static_cast<ContrastEditorField>(index);
+        } else if (contrastEditorField == ContrastEditorField::ContrastStep) {
+          --configContrastStepIndex;
+          if (configContrastStepIndex < 0) {
+            configContrastStepIndex = 10;
+          }
+        } else if (contrastEditorField == ContrastEditorField::Correction) {
+          if (contrastCorrectionTable[configContrastStepIndex] > 0.0f) {
+            contrastCorrectionTable[configContrastStepIndex] -= 0.01f;
+            if (contrastCorrectionTable[configContrastStepIndex] < 0.0f) {
+              contrastCorrectionTable[configContrastStepIndex] = 0.0f;
+            }
+          }
+        } else if (contrastEditorField == ContrastEditorField::Red) {
+          if (contrastRgbTable[configContrastStepIndex].redStep > 0) {
+            --contrastRgbTable[configContrastStepIndex].redStep;
+          }
+        } else if (contrastEditorField == ContrastEditorField::Green) {
+          if (contrastRgbTable[configContrastStepIndex].greenStep > 0) {
+            --contrastRgbTable[configContrastStepIndex].greenStep;
+          }
+        } else if (contrastEditorField == ContrastEditorField::Blue) {
+          if (contrastRgbTable[configContrastStepIndex].blueStep > 0) {
+            --contrastRgbTable[configContrastStepIndex].blueStep;
+          }
+        }
+      } else if (configMenuScreen == ConfigMenuScreen::WhiteLightEditor) {
+        if (!configEditingValue) {
+          int32_t index = static_cast<int32_t>(colorEditorField) - 1;
+          if (index < 0) {
+            index = 3;
+          }
+          colorEditorField = static_cast<ColorEditorField>(index);
+        } else if (colorEditorField == ColorEditorField::Red && whiteLightSetting.redStep > 0) {
+          --whiteLightSetting.redStep;
+        } else if (colorEditorField == ColorEditorField::Green && whiteLightSetting.greenStep > 0) {
+          --whiteLightSetting.greenStep;
+        } else if (colorEditorField == ColorEditorField::Blue && whiteLightSetting.blueStep > 0) {
+          --whiteLightSetting.blueStep;
+        }
+      } else if (configMenuScreen == ConfigMenuScreen::RedLightEditor) {
+        if (!configEditingValue) {
+          int32_t index = static_cast<int32_t>(colorEditorField) - 1;
+          if (index < 0) {
+            index = 3;
+          }
+          colorEditorField = static_cast<ColorEditorField>(index);
+        } else if (colorEditorField == ColorEditorField::Red && redLightSetting.redStep > 0) {
+          --redLightSetting.redStep;
+        } else if (colorEditorField == ColorEditorField::Green && redLightSetting.greenStep > 0) {
+          --redLightSetting.greenStep;
+        } else if (colorEditorField == ColorEditorField::Blue && redLightSetting.blueStep > 0) {
+          --redLightSetting.blueStep;
         }
       }
       drawConfigModeUi();
@@ -1147,12 +1468,16 @@ void handleEncoder() {
             configMenuScreen = ConfigMenuScreen::Lighting;
             configEditingValue = false;
             drawConfigModeUi();
+          } else if (configRootIndex == 1) {
+            configMenuScreen = ConfigMenuScreen::ContrastExposure;
+            configEditingValue = false;
+            drawConfigModeUi();
           } else if (configRootIndex == 3) {
             enterExposureMode();
           } else {
             drawConfigFooter(String(kConfigRootItems[configRootIndex]) + " later", TFT_YELLOW);
           }
-        } else {
+        } else if (configMenuScreen == ConfigMenuScreen::Lighting) {
           if (configLightingIndex == 3) {
             if (configEditingValue) {
               configEditingValue = false;
@@ -1160,6 +1485,46 @@ void handleEncoder() {
               configMenuScreen = ConfigMenuScreen::Root;
             }
           } else {
+            configEditingValue = !configEditingValue;
+          }
+          drawConfigModeUi();
+        } else if (configMenuScreen == ConfigMenuScreen::ContrastExposure) {
+          if (configContrastExposureIndex == 0) {
+            configMenuScreen = ConfigMenuScreen::ContrastTableEditor;
+            contrastEditorField = ContrastEditorField::ContrastStep;
+            configEditingValue = false;
+          } else if (configContrastExposureIndex == 1) {
+            configMenuScreen = ConfigMenuScreen::WhiteLightEditor;
+            colorEditorField = ColorEditorField::Red;
+            configEditingValue = false;
+          } else if (configContrastExposureIndex == 2) {
+            configMenuScreen = ConfigMenuScreen::RedLightEditor;
+            colorEditorField = ColorEditorField::Red;
+            configEditingValue = false;
+          } else {
+            configMenuScreen = ConfigMenuScreen::Root;
+            configEditingValue = false;
+          }
+          drawConfigModeUi();
+        } else if (configMenuScreen == ConfigMenuScreen::ContrastTableEditor) {
+          if (contrastEditorField == ContrastEditorField::Back && !configEditingValue) {
+            configMenuScreen = ConfigMenuScreen::ContrastExposure;
+            configEditingValue = false;
+          } else {
+            if (configEditingValue) {
+              saveConfigValues();
+            }
+            configEditingValue = !configEditingValue;
+          }
+          drawConfigModeUi();
+        } else if (configMenuScreen == ConfigMenuScreen::WhiteLightEditor || configMenuScreen == ConfigMenuScreen::RedLightEditor) {
+          if (colorEditorField == ColorEditorField::Back && !configEditingValue) {
+            configMenuScreen = ConfigMenuScreen::ContrastExposure;
+            configEditingValue = false;
+          } else {
+            if (configEditingValue) {
+              saveConfigValues();
+            }
             configEditingValue = !configEditingValue;
           }
           drawConfigModeUi();

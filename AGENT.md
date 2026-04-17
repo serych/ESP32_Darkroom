@@ -232,4 +232,18 @@ In 'Osvetleni' there will be 3 items:
 - 'Osvetleni tlacitek' - the same principle -> GPIO14
 - 'Osvetleni displeje' - the same -> GPIO17
 - 'Zpet' - parent menu level  
+## 5. Color and correction table settings
+- menu 'Kontrast/Expozice'
+    - 'Barvy + korekce'
+    - 'Bile svetlo'
+    - 'Cervene svetlo'
+    - 'Zpet'
+We need to set contrast correction values and light colors for all the contrast steps in range 0..10 in the 'Barvy + korekce' item. 
+- Correction values are in range 0 to 4 with 2 decimal numbers steps. The default value is 1.0
+- Default color values are {3,5,5} (range 0..10 as described in Current firmware behavior.) Show the color on the light head during the setting. All the values will be written to NVS
+- We will set the white light color in 'Bile svetlo' (no correction value, just the color)
+- We will set the red light color in 'Cervene svetlo' 
+Also in these two cases show the actual color during the settings and write the values to the NVS 
+
+
 

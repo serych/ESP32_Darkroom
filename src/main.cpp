@@ -24,6 +24,9 @@ constexpr uint16_t kStartupTonesHz[] = {523, 659, 784};
 constexpr uint32_t kStartupToneDurationMs = 120;
 constexpr uint32_t kStartupGapMs = 80;
 constexpr uint32_t kClickToneDurationMs = 15;
+constexpr uint32_t kDeveloperTimerFinalShortBeepMs = 60;
+constexpr uint32_t kDeveloperTimerFinalLongBeepMs = 500;
+constexpr uint16_t kDeveloperTimerBeepHz = 2093;
 constexpr uint32_t kExposureEndToneDurationMs = 100;
 constexpr uint32_t kExposureEndToneGapMs = 50;
 constexpr uint32_t kWifiConnectTimeoutMs = 30000;
@@ -43,6 +46,7 @@ constexpr char kConfigContrastRgbKey[] = "rgb_tbl";
 constexpr char kConfigWhiteLightKey[] = "white_rgb";
 constexpr char kConfigRedHeadKey[] = "red_rgb";
 constexpr char kConfigNetworkEnabledKey[] = "net_en";
+constexpr char kConfigDevTimerKey[] = "dev_time";
 enum class UiMode : uint8_t {
   BootConnect,
   WifiScan,
@@ -118,6 +122,7 @@ bool prevDeveloperPressed = false;
 bool prevEncoderButtonPressed = false;
 uint32_t encoderButtonPressedAt = 0;
 bool encoderLongPressHandled = false;
+bool developerTimerAdjustUsed = false;
 
 UiMode uiMode = UiMode::BootConnect;
 String wifiSsid;
@@ -191,6 +196,11 @@ uint32_t lastExposureLuxReadAt = 0;
 constexpr uint32_t kExposureLuxRefreshMs = 1000;
 LightOutputMode lightOutputMode = LightOutputMode::Off;
 bool redChordArmed = false;
+uint16_t developerTimerSettingSeconds = 90;
+bool developerTimerRunning = false;
+uint32_t developerTimerStartedAt = 0;
+uint32_t developerTimerDurationMs = 0;
+int32_t developerTimerLastAnnouncedSecond = -1;
 uint8_t darkroomRedLevel = 0;
 uint8_t buttonsBacklightLevel = 0;
 uint8_t displayBacklightLevel = 6;
@@ -227,6 +237,7 @@ void applyExposureLightOutput();
 void stopExposure(bool completed);
 void startExposure();
 void drawExposureFooter();
+void drawDeveloperTimerStatus(uint16_t color);
 void playExposureEndTone();
 void applyLightOutputMode();
 uint8_t pwmFromAuxLevel(uint8_t level);
@@ -238,6 +249,7 @@ bool saveConfigValues();
 void applyConfigPreview();
 String formatCorrectionValue(float value);
 String formatLuxValue(float lux);
+String formatDeveloperTimerSeconds(uint32_t seconds);
 void initializeLightSensor();
 void refreshExposureLux(bool force);
 String formatNetworkStatus();
@@ -247,6 +259,9 @@ void cancelWifiUiToConfig();
 void connectStoredWifiFromConfig();
 void shutdownWifi();
 void runWifiScanDiagnostic();
+void startDeveloperTimer();
+void stopDeveloperTimer();
+void updateDeveloperTimer();
 
 void setStatusLed(uint8_t red, uint8_t green, uint8_t blue) {
   statusLed.setPixelColor(0, statusLed.Color(red, green, blue));
@@ -309,6 +324,7 @@ void loadConfigValues() {
   preferences.getBytes(kConfigWhiteLightKey, &whiteLightSetting, sizeof(whiteLightSetting));
   preferences.getBytes(kConfigRedHeadKey, &redLightSetting, sizeof(redLightSetting));
   networkEnabled = preferences.getBool(kConfigNetworkEnabledKey, networkEnabled);
+  developerTimerSettingSeconds = preferences.getUShort(kConfigDevTimerKey, developerTimerSettingSeconds);
   preferences.end();
 
   if (darkroomRedLevel > 7) {
@@ -334,6 +350,11 @@ void loadConfigValues() {
     apertureValue = 0;
   } else if (apertureValue > 6) {
     apertureValue = 6;
+  }
+  if (developerTimerSettingSeconds < 10) {
+    developerTimerSettingSeconds = 10;
+  } else if (developerTimerSettingSeconds > 300) {
+    developerTimerSettingSeconds = 300;
   }
 
   for (size_t i = 0; i < 11; ++i) {
@@ -389,7 +410,8 @@ bool saveConfigValues() {
                   preferences.putBytes(kConfigContrastRgbKey, contrastRgbTable, sizeof(contrastRgbTable)) == sizeof(contrastRgbTable) &&
                   preferences.putBytes(kConfigWhiteLightKey, &whiteLightSetting, sizeof(whiteLightSetting)) == sizeof(whiteLightSetting) &&
                   preferences.putBytes(kConfigRedHeadKey, &redLightSetting, sizeof(redLightSetting)) == sizeof(redLightSetting) &&
-                  preferences.putBool(kConfigNetworkEnabledKey, networkEnabled);
+                  preferences.putBool(kConfigNetworkEnabledKey, networkEnabled) &&
+                  preferences.putUShort(kConfigDevTimerKey, developerTimerSettingSeconds) > 0;
   preferences.end();
   return ok;
 }
@@ -655,10 +677,9 @@ void drawExposureHeader() {
 
   tft.setTextFont(2);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawRightString(lightSensorAvailable ? (exposureLuxValid ? formatLuxValue(exposureLux) : "...") : "ERR",
-                      tft.width() - 8,
-                      54,
-                      2);
+  if (lightSensorAvailable) {
+    tft.drawRightString(exposureLuxValid ? formatLuxValue(exposureLux) : "...", tft.width() - 8, 54, 2);
+  }
 }
 
 void drawExposureFooter() {
@@ -674,6 +695,29 @@ void drawExposureFooter() {
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
     tft.drawString("Timer start", 8, 212, 4);
   }
+
+  drawDeveloperTimerStatus(TFT_CYAN);
+}
+
+void drawDeveloperTimerStatus(uint16_t color) {
+  uint32_t seconds = developerTimerSettingSeconds;
+  bool blinkInvert = false;
+  if (developerTimerRunning) {
+    const uint32_t elapsedMs = millis() - developerTimerStartedAt;
+    if (elapsedMs >= developerTimerDurationMs) {
+      seconds = 0;
+    } else {
+      seconds = (developerTimerDurationMs - elapsedMs + 999U) / 1000U;
+      blinkInvert = seconds <= 10 && ((millis() / 250U) % 2U == 0U);
+    }
+  }
+
+  tft.setTextFont(4);
+  const uint16_t background = blinkInvert ? color : TFT_BLACK;
+  const uint16_t foreground = blinkInvert ? TFT_BLACK : color;
+  tft.fillRect(118, 208, tft.width() - 118, 32, background);
+  tft.setTextColor(foreground, background);
+  tft.drawRightString(formatDeveloperTimerSeconds(seconds), tft.width() - 8, 212, 4);
 }
 
 void playExposureEndTone() {
@@ -930,6 +974,48 @@ String formatLuxValue(float lux) {
   return String(static_cast<uint32_t>(lux + 0.5f)) + " lx";
 }
 
+String formatDeveloperTimerSeconds(uint32_t seconds) {
+  return "DEV: " + String(seconds) + " s";
+}
+
+void startDeveloperTimer() {
+  developerTimerDurationMs = static_cast<uint32_t>(developerTimerSettingSeconds) * 1000U;
+  developerTimerStartedAt = millis();
+  developerTimerRunning = true;
+  developerTimerLastAnnouncedSecond = -1;
+  drawExposureFooter();
+}
+
+void stopDeveloperTimer() {
+  developerTimerRunning = false;
+  developerTimerDurationMs = 0;
+  developerTimerLastAnnouncedSecond = -1;
+  drawExposureFooter();
+}
+
+void updateDeveloperTimer() {
+  if (!developerTimerRunning) {
+    return;
+  }
+
+  const uint32_t elapsedMs = millis() - developerTimerStartedAt;
+  if (elapsedMs >= developerTimerDurationMs) {
+    developerTimerRunning = false;
+    developerTimerDurationMs = 0;
+    developerTimerLastAnnouncedSecond = -1;
+    drawExposureFooter();
+    return;
+  }
+
+  const uint32_t remainingMs = developerTimerDurationMs - elapsedMs;
+  const int32_t remainingSeconds = static_cast<int32_t>((remainingMs + 999U) / 1000U);
+  if (remainingSeconds <= 10 && remainingSeconds >= 1 && remainingSeconds != developerTimerLastAnnouncedSecond) {
+    developerTimerLastAnnouncedSecond = remainingSeconds;
+    const uint32_t durationMs = (remainingSeconds == 1) ? kDeveloperTimerFinalLongBeepMs : kDeveloperTimerFinalShortBeepMs;
+    DarkroomHw::startBeep(kDeveloperTimerBeepHz, durationMs);
+  }
+}
+
 void initializeLightSensor() {
   Wire.begin(DarkroomHw::PinAssignment::kI2cSda, DarkroomHw::PinAssignment::kI2cScl);
   Wire.setClock(kI2cClockHz);
@@ -1169,6 +1255,7 @@ void stopExposure(bool completed) {
     tft.setTextFont(4);
     tft.setTextColor(completed ? TFT_GREEN : TFT_YELLOW, TFT_BLACK);
     tft.drawString(completed ? "Hotovo" : "Zastaveno", 8, 212, 4);
+    drawDeveloperTimerStatus(TFT_CYAN);
   }
 }
 
@@ -1382,6 +1469,7 @@ void applyPressedColor(const DarkroomHw::ButtonState& buttons) {
 
 void handleButtonEdges(const DarkroomHw::ButtonState& buttons) {
   const bool lightOnReleased = !buttons.lightOn && prevLightOnPressed;
+  const bool developerReleased = !buttons.developerTimer && prevDeveloperPressed;
 
   if (buttons.lightTimer && !prevLightTimerPressed) {
     DarkroomHw::startBeep(3520, kClickToneDurationMs);
@@ -1434,12 +1522,25 @@ void handleButtonEdges(const DarkroomHw::ButtonState& buttons) {
   }
 
   if (buttons.developerTimer && !prevDeveloperPressed) {
-    DarkroomHw::startBeep(3520, kClickToneDurationMs);
+    if (uiMode == UiMode::ExposureMode) {
+      developerTimerAdjustUsed = false;
+    } else {
+      DarkroomHw::startBeep(3520, kClickToneDurationMs);
+    }
+
     if (uiMode == UiMode::WifiScanResult) {
       runWifiScanDiagnostic();
     } else if (uiMode == UiMode::WifiPasswordEntry) {
       beginWifiConnectWithEnteredCredentials();
     }
+  }
+
+  if (developerReleased && uiMode == UiMode::ExposureMode) {
+    if (!developerTimerAdjustUsed) {
+      DarkroomHw::startBeep(3520, kClickToneDurationMs);
+      startDeveloperTimer();
+    }
+    developerTimerAdjustUsed = false;
   }
 
   if (lightOnReleased && uiMode == UiMode::ExposureMode && !exposureRunning && redChordArmed) {
@@ -1466,6 +1567,13 @@ void handleEncoder() {
     if (uiMode == UiMode::WifiScanResult && networkCount > 0) {
       selectedNetworkIndex = (selectedNetworkIndex + 1) % static_cast<int32_t>(networkCount);
       drawWifiScanResultUi();
+    } else if (uiMode == UiMode::ExposureMode && DarkroomHw::isDeveloperTimerButtonPressed()) {
+      developerTimerAdjustUsed = true;
+      if (!developerTimerRunning && developerTimerSettingSeconds < 300) {
+        ++developerTimerSettingSeconds;
+        saveConfigValues();
+      }
+      drawExposureFooter();
     } else if (uiMode == UiMode::ConfigMode) {
       if (configMenuScreen == ConfigMenuScreen::Root) {
         configRootIndex = (configRootIndex + 1) % static_cast<int32_t>(kConfigRootItemCount);
@@ -1566,6 +1674,13 @@ void handleEncoder() {
         selectedNetworkIndex = static_cast<int32_t>(networkCount) - 1;
       }
       drawWifiScanResultUi();
+    } else if (uiMode == UiMode::ExposureMode && DarkroomHw::isDeveloperTimerButtonPressed()) {
+      developerTimerAdjustUsed = true;
+      if (!developerTimerRunning && developerTimerSettingSeconds > 10) {
+        --developerTimerSettingSeconds;
+        saveConfigValues();
+      }
+      drawExposureFooter();
     } else if (uiMode == UiMode::ConfigMode) {
       if (configMenuScreen == ConfigMenuScreen::Root) {
         --configRootIndex;
@@ -1901,9 +2016,9 @@ void loop() {
     lastWifiStatusRefreshAt = millis();
   }
 
-  if (exposureRunning) {
+  if (exposureRunning || developerTimerRunning) {
     const uint32_t now = millis();
-    if ((now - exposureStartedAt) >= exposureDurationMs) {
+    if (exposureRunning && (now - exposureStartedAt) >= exposureDurationMs) {
       stopExposure(true);
     } else if (uiMode == UiMode::ExposureMode && (now - lastExposureUiRefreshAt) >= 100) {
       lastExposureUiRefreshAt = now;
@@ -1914,6 +2029,8 @@ void loop() {
   if (uiMode == UiMode::ExposureMode) {
     refreshExposureLux(false);
   }
+
+  updateDeveloperTimer();
 
   const DarkroomHw::ButtonState buttons = DarkroomHw::readButtons();
   applyPressedColor(buttons);

@@ -40,6 +40,7 @@ If `pio` is not available in `PATH`, use the installed PlatformIO executable or 
 - [Hardware Interface](docs/hardware-interface.md)
 - [Timers And Signals](docs/timers-and-signals.md)
 - [User Manual](docs/user-manual.md)
+- [Uzivatelska Prirucka](docs/uzivatelska-prirucka.md)
 - [Roadmap](docs/roadmap.md)
 - [Known Issues](docs/known-issues.md)
 

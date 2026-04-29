@@ -289,7 +289,7 @@ void drawBootUi() {
   tft.setTextSize(1);
   tft.setTextFont(4);
   tft.setTextColor(TFT_RED, TFT_BLACK);
-  tft.drawString("Darkroom controler", 8, 10, 4);
+  tft.drawString("Darkroom controller", 8, 10, 4);
 }
 
 void drawWifiStatusLine(const String& text, uint16_t color) {
@@ -500,7 +500,7 @@ void drawWifiScanResultUi() {
   tft.setTextSize(1);
   tft.setTextFont(4);
   tft.setTextColor(TFT_RED, TFT_BLACK);
-  tft.drawString("Darkroom controler", 8, 10, 4);
+  tft.drawString("Darkroom controller", 8, 10, 4);
 
   tft.setTextFont(4);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
@@ -538,7 +538,7 @@ void drawPasswordEntryUi() {
   tft.setTextSize(1);
   tft.setTextFont(4);
   tft.setTextColor(TFT_RED, TFT_BLACK);
-  tft.drawString("Darkroom controler", 8, 10, 4);
+  tft.drawString("Darkroom controller", 8, 10, 4);
 
   tft.setTextFont(4);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
@@ -576,7 +576,7 @@ void drawWifiConnectingUi() {
   tft.setTextSize(1);
   tft.setTextFont(4);
   tft.setTextColor(TFT_RED, TFT_BLACK);
-  tft.drawString("Darkroom controler", 8, 10, 4);
+  tft.drawString("Darkroom controller", 8, 10, 4);
 
   tft.setTextFont(4);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
@@ -596,7 +596,7 @@ void drawWifiConnectedUi() {
   tft.setTextSize(1);
   tft.setTextFont(4);
   tft.setTextColor(TFT_RED, TFT_BLACK);
-  tft.drawString("Darkroom controler", 8, 10, 4);
+  tft.drawString("Darkroom controller", 8, 10, 4);
 
   tft.setTextFont(4);
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
@@ -619,7 +619,7 @@ void drawNetworkDisabledStartupUi() {
   tft.setTextSize(1);
   tft.setTextFont(4);
   tft.setTextColor(TFT_RED, TFT_BLACK);
-  tft.drawString("Darkroom controler", 8, 10, 4);
+  tft.drawString("Darkroom controller", 8, 10, 4);
 
   tft.setTextFont(4);
   tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
@@ -637,7 +637,7 @@ void drawExposureModeUi() {
   tft.setTextSize(1);
   tft.setTextFont(4);
   tft.setTextColor(TFT_RED, TFT_BLACK);
-  tft.drawString("Darkroom controler", 8, 10, 4);
+  tft.drawString("Darkroom controller", 8, 10, 4);
 
   drawExposureHeader();
 
@@ -740,7 +740,7 @@ void drawConfigModeUi() {
   tft.setTextSize(1);
   tft.setTextFont(4);
   tft.setTextColor(TFT_RED, TFT_BLACK);
-  tft.drawString("Darkroom controler", 8, 10, 4);
+  tft.drawString("Darkroom controller", 8, 10, 4);
 
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("Konfigurace", 8, 48, 4);
@@ -1280,7 +1280,7 @@ void drawWifiScanUi() {
   tft.setTextSize(1);
   tft.setTextFont(4);
   tft.setTextColor(TFT_RED, TFT_BLACK);
-  tft.drawString("Darkroom controler", 8, 10, 4);
+  tft.drawString("Darkroom controller", 8, 10, 4);
 
   tft.setTextFont(2);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);

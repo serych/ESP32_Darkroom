@@ -1,9 +1,11 @@
 #include <Arduino.h>
 #include <Adafruit_NeoPixel.h>
+#include <Adafruit_VEML7700.h>
 #include <TFT_eSPI.h>
 #include <Preferences.h>
 #include <WiFi.h>
 #include <ArduinoOTA.h>
+#include <Wire.h>
 #include <math.h>
 
 #include "darkroom_hw.h"
@@ -25,6 +27,7 @@ constexpr uint32_t kClickToneDurationMs = 15;
 constexpr uint32_t kExposureEndToneDurationMs = 100;
 constexpr uint32_t kExposureEndToneGapMs = 50;
 constexpr uint32_t kWifiConnectTimeoutMs = 30000;
+constexpr uint32_t kI2cClockHz = 50000;
 constexpr char kWifiPrefsNamespace[] = "wifi";
 constexpr char kWifiSsidKey[] = "ssid";
 constexpr char kWifiPasswordKey[] = "password";
@@ -39,6 +42,7 @@ constexpr char kConfigCorrectionTableKey[] = "corr_tbl";
 constexpr char kConfigContrastRgbKey[] = "rgb_tbl";
 constexpr char kConfigWhiteLightKey[] = "white_rgb";
 constexpr char kConfigRedHeadKey[] = "red_rgb";
+constexpr char kConfigNetworkEnabledKey[] = "net_en";
 enum class UiMode : uint8_t {
   BootConnect,
   WifiScan,
@@ -78,6 +82,7 @@ enum class LightOutputMode : uint8_t {
 enum class ConfigMenuScreen : uint8_t {
   Root,
   Lighting,
+  Network,
   ContrastExposure,
   ContrastTableEditor,
   WhiteLightEditor,
@@ -104,6 +109,7 @@ enum class ColorEditorField : uint8_t {
 TFT_eSPI tft = TFT_eSPI();
 Adafruit_NeoPixel statusLed(DarkroomHw::kStatusLedCount, DarkroomHw::kStatusLedPin, NEO_GRB + NEO_KHZ800);
 Preferences preferences;
+Adafruit_VEML7700 lightSensor;
 
 bool prevLightOnPressed = false;
 bool prevLightOffPressed = false;
@@ -181,17 +187,34 @@ bool exposureRunning = false;
 uint32_t exposureStartedAt = 0;
 uint32_t exposureDurationMs = 0;
 uint32_t lastExposureUiRefreshAt = 0;
+uint32_t lastExposureLuxReadAt = 0;
+constexpr uint32_t kExposureLuxRefreshMs = 1000;
 LightOutputMode lightOutputMode = LightOutputMode::Off;
 bool redChordArmed = false;
 uint8_t darkroomRedLevel = 0;
 uint8_t buttonsBacklightLevel = 0;
 uint8_t displayBacklightLevel = 6;
+bool lightSensorAvailable = false;
+bool exposureLuxValid = false;
+float exposureLux = 0.0f;
 int32_t configContrastExposureIndex = 0;
 int32_t configContrastStepIndex = 0;
 ContrastEditorField contrastEditorField = ContrastEditorField::ContrastStep;
 ColorEditorField colorEditorField = ColorEditorField::Red;
+bool networkEnabled = false;
+int32_t configNetworkIndex = 0;
+constexpr const char* kNetworkItems[] = {
+    "Sit povolena",
+    "Pripojit ted",
+    "Nastavit WiFi",
+    "Zpet",
+};
+constexpr size_t kNetworkItemCount = sizeof(kNetworkItems) / sizeof(kNetworkItems[0]);
+bool wifiUiReturnToConfig = false;
 
 void drawWifiConnectedUi();
+void drawNetworkDisabledStartupUi();
+void drawWifiConnectingUi();
 void ensureOtaStarted();
 void drawExposureModeUi();
 void drawConfigModeUi();
@@ -208,11 +231,22 @@ void playExposureEndTone();
 void applyLightOutputMode();
 uint8_t pwmFromAuxLevel(uint8_t level);
 void applyAuxOutputs();
+void drawExposureHeader();
 void drawConfigFooter(const String& text, uint16_t color);
 void loadConfigValues();
 bool saveConfigValues();
 void applyConfigPreview();
 String formatCorrectionValue(float value);
+String formatLuxValue(float lux);
+void initializeLightSensor();
+void refreshExposureLux(bool force);
+String formatNetworkStatus();
+void startWifiSetupFlow(bool returnToConfig);
+void returnFromWifiUi();
+void cancelWifiUiToConfig();
+void connectStoredWifiFromConfig();
+void shutdownWifi();
+void runWifiScanDiagnostic();
 
 void setStatusLed(uint8_t red, uint8_t green, uint8_t blue) {
   statusLed.setPixelColor(0, statusLed.Color(red, green, blue));
@@ -274,6 +308,7 @@ void loadConfigValues() {
   preferences.getBytes(kConfigContrastRgbKey, contrastRgbTable, sizeof(contrastRgbTable));
   preferences.getBytes(kConfigWhiteLightKey, &whiteLightSetting, sizeof(whiteLightSetting));
   preferences.getBytes(kConfigRedHeadKey, &redLightSetting, sizeof(redLightSetting));
+  networkEnabled = preferences.getBool(kConfigNetworkEnabledKey, networkEnabled);
   preferences.end();
 
   if (darkroomRedLevel > 7) {
@@ -353,7 +388,8 @@ bool saveConfigValues() {
                   preferences.putBytes(kConfigCorrectionTableKey, contrastCorrectionTable, sizeof(contrastCorrectionTable)) == sizeof(contrastCorrectionTable) &&
                   preferences.putBytes(kConfigContrastRgbKey, contrastRgbTable, sizeof(contrastRgbTable)) == sizeof(contrastRgbTable) &&
                   preferences.putBytes(kConfigWhiteLightKey, &whiteLightSetting, sizeof(whiteLightSetting)) == sizeof(whiteLightSetting) &&
-                  preferences.putBytes(kConfigRedHeadKey, &redLightSetting, sizeof(redLightSetting)) == sizeof(redLightSetting);
+                  preferences.putBytes(kConfigRedHeadKey, &redLightSetting, sizeof(redLightSetting)) == sizeof(redLightSetting) &&
+                  preferences.putBool(kConfigNetworkEnabledKey, networkEnabled);
   preferences.end();
   return ok;
 }
@@ -375,7 +411,7 @@ void loadWifiCredentials() {
 }
 
 void beginWifiConnectIfNeeded() {
-  if (!wifiCredentialsValid) {
+  if (!networkEnabled || !wifiCredentialsValid) {
     return;
   }
 
@@ -388,7 +424,22 @@ void beginWifiConnectIfNeeded() {
   lastWifiStatusRefreshAt = 0;
 }
 
+void shutdownWifi() {
+  wifiConnectTimedOut = false;
+  wifiConnectedScreenShown = false;
+  lastWifiStatusRefreshAt = 0;
+  WiFi.disconnect(true, true);
+  delay(100);
+  WiFi.mode(WIFI_OFF);
+}
+
 void updateWifiStatusUi() {
+  if (!networkEnabled) {
+    wifiConnectedScreenShown = false;
+    drawWifiStatusLine("WiFi vypnuta", TFT_DARKGREY);
+    return;
+  }
+
   if (!wifiCredentialsValid) {
     wifiConnectedScreenShown = false;
     drawWifiStatusLine("WiFi setup", TFT_CYAN);
@@ -456,7 +507,7 @@ void drawWifiScanResultUi() {
     tft.drawString(String("RSSI ") + String(networks[selectedNetworkIndex].rssi) + "  " + selectedLock, 8, 184, 2);
   }
 
-  drawFooterLine("Rotary = next/prev SSID", TFT_GREEN);
+  drawFooterLine(wifiUiReturnToConfig ? "Rotary=SSID  Long=zpet" : "Rotary = next/prev SSID", TFT_GREEN);
 }
 
 void drawPasswordEntryUi() {
@@ -494,7 +545,7 @@ void drawPasswordEntryUi() {
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("Rotary=char  Enc btn=place", 94, 178, 2);
   tft.drawString("ON:< OFF:del TIMER:> DEV:OK", 8, 198, 2);
-  drawFooterLine("Password entry", TFT_GREEN);
+  drawFooterLine(wifiUiReturnToConfig ? "Password entry  Long=zpet" : "Password entry", TFT_GREEN);
 }
 
 void drawWifiConnectingUi() {
@@ -540,6 +591,24 @@ void drawWifiConnectedUi() {
   drawFooterLine("Credentials saved, OTA ready", TFT_GREEN);
 }
 
+void drawNetworkDisabledStartupUi() {
+  tft.setRotation(1);
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextSize(1);
+  tft.setTextFont(4);
+  tft.setTextColor(TFT_RED, TFT_BLACK);
+  tft.drawString("Darkroom controler", 8, 10, 4);
+
+  tft.setTextFont(4);
+  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  tft.drawString("WiFi disabled", 8, 48, 4);
+
+  tft.setTextFont(2);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("Sit vypnuta", 8, 120, 2);
+  drawFooterLine("Starting exposure mode", TFT_DARKGREY);
+}
+
 void drawExposureModeUi() {
   tft.setRotation(1);
   tft.fillScreen(TFT_BLACK);
@@ -548,8 +617,7 @@ void drawExposureModeUi() {
   tft.setTextColor(TFT_RED, TFT_BLACK);
   tft.drawString("Darkroom controler", 8, 10, 4);
 
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.drawString("Expozice", 8, 48, 4);
+  drawExposureHeader();
 
   const float correctedExposure = exposureSeconds[exposureIndex] * contrastCorrectionTable[contrastValue];
 
@@ -576,6 +644,21 @@ void drawExposureModeUi() {
   tft.drawRightString(String(apertureValue), tft.width() - 8, 176, 4);
 
   drawExposureFooter();
+}
+
+void drawExposureHeader() {
+  tft.setRotation(1);
+  tft.fillRect(0, 44, tft.width(), 28, TFT_BLACK);
+  tft.setTextFont(4);
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.drawString("Expozice", 8, 48, 4);
+
+  tft.setTextFont(2);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawRightString(lightSensorAvailable ? (exposureLuxValid ? formatLuxValue(exposureLux) : "...") : "ERR",
+                      tft.width() - 8,
+                      54,
+                      2);
 }
 
 void drawExposureFooter() {
@@ -652,6 +735,28 @@ void drawConfigModeUi() {
     } else {
       drawConfigFooter("Rotary=vyber  Short=uprav/zpet", TFT_GREEN);
     }
+  } else if (configMenuScreen == ConfigMenuScreen::Network) {
+    for (size_t i = 0; i < kNetworkItemCount; ++i) {
+      const uint16_t background = (static_cast<int32_t>(i) == configNetworkIndex) ? TFT_DARKGREY : TFT_BLACK;
+      const uint16_t color = (static_cast<int32_t>(i) == configNetworkIndex) ? TFT_YELLOW : TFT_WHITE;
+      const int16_t y = 96 + static_cast<int16_t>(i) * 24;
+      tft.fillRect(0, y - 2, tft.width(), 22, background);
+      tft.setTextColor(color, background);
+      tft.drawString(kNetworkItems[i], 8, y, 2);
+
+      if (i == 0) {
+        tft.drawRightString(networkEnabled ? "[x]" : "[ ]", tft.width() - 8, y, 2);
+      }
+    }
+
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString("Stav: " + formatNetworkStatus(), 8, 74, 2);
+    String ssidText = wifiSsid.isEmpty() ? "-" : wifiSsid.substring(0, 20);
+    if (WiFi.status() == WL_CONNECTED && !WiFi.SSID().isEmpty()) {
+      ssidText = WiFi.SSID().substring(0, 20);
+    }
+    tft.drawString("SSID: " + ssidText, 8, 86, 2);
+    drawConfigFooter("Short=akce  Long=expozice", TFT_GREEN);
   } else if (configMenuScreen == ConfigMenuScreen::ContrastExposure) {
     for (size_t i = 0; i < kContrastExposureItemCount; ++i) {
       const uint16_t background = (static_cast<int32_t>(i) == configContrastExposureIndex) ? TFT_DARKGREY : TFT_BLACK;
@@ -738,6 +843,8 @@ void drawConfigModeUi() {
 
 void enterExposureMode() {
   uiMode = UiMode::ExposureMode;
+  lastExposureLuxReadAt = 0;
+  refreshExposureLux(true);
   drawExposureModeUi();
 }
 
@@ -809,6 +916,154 @@ void applyAuxOutputs() {
 
 String formatCorrectionValue(float value) {
   return String(value, 2);
+}
+
+String formatLuxValue(float lux) {
+  if (lux < 10.0f) {
+    return String(lux, 2) + " lx";
+  }
+
+  if (lux < 100.0f) {
+    return String(lux, 1) + " lx";
+  }
+
+  return String(static_cast<uint32_t>(lux + 0.5f)) + " lx";
+}
+
+void initializeLightSensor() {
+  Wire.begin(DarkroomHw::PinAssignment::kI2cSda, DarkroomHw::PinAssignment::kI2cScl);
+  Wire.setClock(kI2cClockHz);
+  lightSensorAvailable = lightSensor.begin(&Wire);
+  if (!lightSensorAvailable) {
+    Serial.println("VEML7700 init failed");
+    return;
+  }
+
+  lightSensor.setIntegrationTime(VEML7700_IT_100MS);
+  lightSensor.setGain(VEML7700_GAIN_1);
+  Serial.println("VEML7700 ready");
+}
+
+void refreshExposureLux(bool force) {
+  if (uiMode != UiMode::ExposureMode) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (!force && (now - lastExposureLuxReadAt) < kExposureLuxRefreshMs) {
+    return;
+  }
+
+  lastExposureLuxReadAt = now;
+  if (!lightSensorAvailable) {
+    exposureLuxValid = false;
+  } else {
+    exposureLux = lightSensor.readLux(VEML_LUX_AUTO);
+    exposureLuxValid = isfinite(exposureLux);
+  }
+
+  drawExposureHeader();
+}
+
+String formatNetworkStatus() {
+  if (!networkEnabled) {
+    return "vypnuto";
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    return "pripojeno";
+  }
+
+  if (!wifiCredentialsValid) {
+    return "bez udaju";
+  }
+
+  if (wifiConnectTimedOut) {
+    return "chyba spojeni";
+  }
+
+  return "pripraveno";
+}
+
+void startWifiSetupFlow(bool returnToConfig) {
+  wifiUiReturnToConfig = returnToConfig;
+  runWifiScanDiagnostic();
+}
+
+void returnFromWifiUi() {
+  wifiConnectedScreenShown = false;
+  if (wifiUiReturnToConfig) {
+    wifiUiReturnToConfig = false;
+    uiMode = UiMode::ConfigMode;
+    configMenuScreen = ConfigMenuScreen::Network;
+    configEditingValue = false;
+    drawConfigModeUi();
+    return;
+  }
+
+  enterExposureMode();
+}
+
+void cancelWifiUiToConfig() {
+  wifiUiReturnToConfig = false;
+  uiMode = UiMode::ConfigMode;
+  configMenuScreen = ConfigMenuScreen::Network;
+  configEditingValue = false;
+  drawConfigModeUi();
+}
+
+void connectStoredWifiFromConfig() {
+  if (!networkEnabled) {
+    uiMode = UiMode::ConfigMode;
+    configMenuScreen = ConfigMenuScreen::Network;
+    drawConfigModeUi();
+    drawConfigFooter("Sit je vypnuta", TFT_YELLOW);
+    return;
+  }
+
+  if (!wifiCredentialsValid) {
+    uiMode = UiMode::ConfigMode;
+    configMenuScreen = ConfigMenuScreen::Network;
+    drawConfigModeUi();
+    drawConfigFooter("Neni ulozene SSID", TFT_YELLOW);
+    return;
+  }
+
+  wifiUiReturnToConfig = true;
+  connectionStatusMessage = "Trying to connect";
+  uiMode = UiMode::WifiConnecting;
+  drawWifiConnectingUi();
+
+  WiFi.disconnect(true, true);
+  delay(100);
+  WiFi.mode(WIFI_STA);
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(wifiSsid.c_str(), wifiPassword.c_str());
+  wifiConnectStartedAt = millis();
+  wifiConnectTimedOut = false;
+
+  while ((millis() - wifiConnectStartedAt) < kWifiConnectTimeoutMs) {
+    DarkroomHw::updateBeep();
+    drawWifiConnectingUi();
+
+    if (WiFi.status() == WL_CONNECTED) {
+      uiMode = UiMode::WifiConnected;
+      wifiConnectedScreenShown = true;
+      selectedSsid = WiFi.SSID();
+      ensureOtaStarted();
+      drawWifiConnectedUi();
+      wifiConnectedShownAt = millis();
+      lastWifiStatusRefreshAt = millis();
+      return;
+    }
+
+    delay(120);
+  }
+
+  wifiConnectTimedOut = true;
+  cancelWifiUiToConfig();
+  drawConfigFooter("Connect failed", TFT_RED);
 }
 
 void applyConfigPreview() {
@@ -904,6 +1159,7 @@ void applyLightOutputMode() {
 void stopExposure(bool completed) {
   exposureRunning = false;
   exposureDurationMs = 0;
+  exposureLuxValid = false;
   lightOutputMode = LightOutputMode::Off;
   applyLightOutputMode();
   playExposureEndTone();
@@ -922,8 +1178,10 @@ void startExposure() {
   exposureDurationMs = static_cast<uint32_t>(clampedExposure * 1000.0f + 0.5f);
   exposureStartedAt = millis();
   lastExposureUiRefreshAt = 0;
+  lastExposureLuxReadAt = 0;
   exposureRunning = true;
   lightOutputMode = LightOutputMode::Exposure;
+  refreshExposureLux(true);
   applyLightOutputMode();
   if (uiMode == UiMode::ExposureMode) {
     drawExposureModeUi();
@@ -942,7 +1200,7 @@ void drawWifiScanUi() {
   tft.drawString("WiFi setup", 8, 48, 2);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("Scanning WiFi, wait please", 8, 84, 2);
-  drawFooterLine("Scanning...", TFT_YELLOW);
+  drawFooterLine(wifiUiReturnToConfig ? "Scanning...  Long=zpet" : "Scanning...", TFT_YELLOW);
 }
 
 void runWifiScanDiagnostic() {
@@ -1227,6 +1485,8 @@ void handleEncoder() {
         }
       } else if (configMenuScreen == ConfigMenuScreen::Lighting) {
         configLightingIndex = (configLightingIndex + 1) % static_cast<int32_t>(kLightingItemCount);
+      } else if (configMenuScreen == ConfigMenuScreen::Network) {
+        configNetworkIndex = (configNetworkIndex + 1) % static_cast<int32_t>(kNetworkItemCount);
       } else if (configMenuScreen == ConfigMenuScreen::ContrastExposure) {
         configContrastExposureIndex = (configContrastExposureIndex + 1) % static_cast<int32_t>(kContrastExposureItemCount);
       } else if (configMenuScreen == ConfigMenuScreen::ContrastTableEditor) {
@@ -1331,6 +1591,11 @@ void handleEncoder() {
         if (configLightingIndex < 0) {
           configLightingIndex = static_cast<int32_t>(kLightingItemCount) - 1;
         }
+      } else if (configMenuScreen == ConfigMenuScreen::Network) {
+        --configNetworkIndex;
+        if (configNetworkIndex < 0) {
+          configNetworkIndex = static_cast<int32_t>(kNetworkItemCount) - 1;
+        }
       } else if (configMenuScreen == ConfigMenuScreen::ContrastExposure) {
         --configContrastExposureIndex;
         if (configContrastExposureIndex < 0) {
@@ -1431,7 +1696,9 @@ void handleEncoder() {
       DarkroomHw::startBeep(3520, kClickToneDurationMs);
       insertSelectedCharacter();
       drawPasswordEntryUi();
-    } else if (uiMode == UiMode::ExposureMode || uiMode == UiMode::ConfigMode) {
+    } else if (uiMode == UiMode::ExposureMode || uiMode == UiMode::ConfigMode ||
+               (wifiUiReturnToConfig &&
+                (uiMode == UiMode::WifiScan || uiMode == UiMode::WifiScanResult || uiMode == UiMode::WifiPasswordEntry))) {
       encoderButtonPressedAt = millis();
       encoderLongPressHandled = false;
     }
@@ -1439,14 +1706,18 @@ void handleEncoder() {
 
   if (encoderButtonPressed &&
       !encoderLongPressHandled &&
-      (uiMode == UiMode::ExposureMode || uiMode == UiMode::ConfigMode) &&
+      (uiMode == UiMode::ExposureMode || uiMode == UiMode::ConfigMode ||
+       (wifiUiReturnToConfig &&
+        (uiMode == UiMode::WifiScan || uiMode == UiMode::WifiScanResult || uiMode == UiMode::WifiPasswordEntry))) &&
       (millis() - encoderButtonPressedAt) >= kEncoderLongPressMs) {
     DarkroomHw::startBeep(1760, kClickToneDurationMs);
     encoderLongPressHandled = true;
     if (uiMode == UiMode::ExposureMode) {
       enterConfigMode();
-    } else {
+    } else if (uiMode == UiMode::ConfigMode) {
       enterExposureMode();
+    } else {
+      cancelWifiUiToConfig();
     }
   }
 
@@ -1472,6 +1743,10 @@ void handleEncoder() {
             configMenuScreen = ConfigMenuScreen::ContrastExposure;
             configEditingValue = false;
             drawConfigModeUi();
+          } else if (configRootIndex == 2) {
+            configMenuScreen = ConfigMenuScreen::Network;
+            configEditingValue = false;
+            drawConfigModeUi();
           } else if (configRootIndex == 3) {
             enterExposureMode();
           } else {
@@ -1488,6 +1763,27 @@ void handleEncoder() {
             configEditingValue = !configEditingValue;
           }
           drawConfigModeUi();
+        } else if (configMenuScreen == ConfigMenuScreen::Network) {
+          if (configNetworkIndex == 0) {
+            networkEnabled = !networkEnabled;
+            saveConfigValues();
+            if (!networkEnabled) {
+              shutdownWifi();
+            }
+            drawConfigModeUi();
+          } else if (configNetworkIndex == 1) {
+            connectStoredWifiFromConfig();
+          } else if (configNetworkIndex == 2) {
+            if (!networkEnabled) {
+              drawConfigModeUi();
+              drawConfigFooter("Nejdriv povolte sit", TFT_YELLOW);
+            } else {
+              startWifiSetupFlow(true);
+            }
+          } else {
+            configMenuScreen = ConfigMenuScreen::Root;
+            drawConfigModeUi();
+          }
         } else if (configMenuScreen == ConfigMenuScreen::ContrastExposure) {
           if (configContrastExposureIndex == 0) {
             configMenuScreen = ConfigMenuScreen::ContrastTableEditor;
@@ -1546,6 +1842,7 @@ void setup() {
 
   initializeExposureSteps();
   DarkroomHw::initHardware();
+  initializeLightSensor();
   loadConfigValues();
   loadWifiCredentials();
   beginWifiConnectIfNeeded();
@@ -1563,12 +1860,19 @@ void setup() {
   tft.setRotation(1);
 
   drawBootUi();
-  updateWifiStatusUi();
 
   DarkroomHw::updateEncoder();
 
-  if (!wifiCredentialsValid) {
-    runWifiScanDiagnostic();
+  if (networkEnabled) {
+    updateWifiStatusUi();
+    if (!wifiCredentialsValid) {
+      startWifiSetupFlow(false);
+    }
+  } else {
+    uiMode = UiMode::WifiConnected;
+    wifiConnectedScreenShown = true;
+    wifiConnectedShownAt = millis();
+    drawNetworkDisabledStartupUi();
   }
 }
 
@@ -1580,19 +1884,19 @@ void loop() {
   }
 
   if (uiMode == UiMode::WifiConnected && wifiConnectedScreenShown && (millis() - wifiConnectedShownAt) >= 2000) {
-    wifiConnectedScreenShown = false;
-    enterExposureMode();
+    returnFromWifiUi();
   }
 
-  if (wifiCredentialsValid && !wifiConnectTimedOut && WiFi.status() != WL_CONNECTED) {
+  if (uiMode == UiMode::BootConnect && networkEnabled && wifiCredentialsValid && !wifiConnectTimedOut && WiFi.status() != WL_CONNECTED) {
     if ((millis() - wifiConnectStartedAt) >= kWifiConnectTimeoutMs) {
       wifiConnectTimedOut = true;
-      runWifiScanDiagnostic();
+      startWifiSetupFlow(false);
     } else if ((millis() - lastWifiStatusRefreshAt) >= 250) {
       lastWifiStatusRefreshAt = millis();
       updateWifiStatusUi();
     }
-  } else if (wifiCredentialsValid && WiFi.status() == WL_CONNECTED && lastWifiStatusRefreshAt == 0) {
+  } else if (uiMode == UiMode::BootConnect && networkEnabled && wifiCredentialsValid && WiFi.status() == WL_CONNECTED &&
+             lastWifiStatusRefreshAt == 0) {
     updateWifiStatusUi();
     lastWifiStatusRefreshAt = millis();
   }
@@ -1605,6 +1909,10 @@ void loop() {
       lastExposureUiRefreshAt = now;
       drawExposureFooter();
     }
+  }
+
+  if (uiMode == UiMode::ExposureMode) {
+    refreshExposureLux(false);
   }
 
   const DarkroomHw::ButtonState buttons = DarkroomHw::readButtons();
